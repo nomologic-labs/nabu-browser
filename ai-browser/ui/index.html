@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <!-- Prevent WebKit2GTK from auto-scaling or zooming the shell viewport -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Nabu Browser</title>
+
+  <!--
+    Shell Navigation Guard — must be the FIRST script in the document.
+
+    Problem: iframe pages loaded with sandbox="allow-same-origin" share
+    the parent's origin, so their scripts can access window.top / window.parent
+    directly. Many websites contain frame-busting code such as:
+        if (window.top !== window.self) window.top.location.href = url;
+    When run inside the iframe this calls the PARENT window's Location setter,
+    which causes pywebview's GTK backend to navigate the entire shell to that
+    URL — making all browser UI disappear.
+
+    Fix: Override Location.prototype here, in the parent's JS realm, to turn
+    all href/assign/replace calls into no-ops. The shell never needs to
+    navigate itself (all content loads happen via frame.srcdoc in app.js),
+    so this is safe. The pywebview JS↔Python bridge communicates through
+    WebKit IPC / window.pywebview, not through window.location, so the
+    bridge is unaffected.
+  -->
+  <script>
+  (function () {
+    // Shell Navigation Router — runs in the PARENT window's JS realm.
+    //
+    // With sandbox="allow-top-navigation", an iframe page that calls
+    // window.top.location.href = url reaches this setter in the parent's realm.
+    // Instead of blocking (old behaviour) or allowing a real navigation (which
+    // would replace index.html), we intercept every href/assign/replace call and
+    // route it through loadUrl() — the proxy loader defined in app.js.
+    //
+    // loadUrl() is async and defined later in app.js; the setter simply calls it
+    // if available, so there is no ordering problem (the setter fires only when
+    // the iframe is already loaded, well after app.js has executed).
+    //
+    // WebKit2GTK does not expose 'href' as an own property of Location.prototype,
+    // so getOwnPropertyDescriptor returns undefined.  Guard against that.
+    var _nabuRoute = function (v) {
+      try {
+        if (typeof v === 'string' && v && typeof window.loadUrl === 'function') {
+          window.loadUrl(v);
+        }
+      } catch (_) {}
+    };
+    try {
+      var _hd = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+      var _g  = (_hd && _hd.get) ? _hd.get : function () { return this.toString(); };
+      Object.defineProperty(Location.prototype, 'href', {
+        set: _nabuRoute,
+        get: _g,
+        configurable: true,
+      });
+    } catch (_) {}
+    try { Location.prototype.assign  = function (u) { _nabuRoute(u); }; } catch (_) {}
+    try { Location.prototype.replace = function (u) { _nabuRoute(u); }; } catch (_) {}
+    try { Location.prototype.reload  = function ()  { /* no-op */    }; } catch (_) {}
+  })();
+  </script>
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!--
+    #app-container — CSS Grid skeleton with exactly two rows:
+      grid-row 1  →  #navigation-toolbar  (auto height, never shrinks)
+      grid-row 2  →  #workspace-body      (1fr, absorbs all remaining space)
+
+    #workspace-body — CSS Grid with exactly two columns:
+      grid-column 1  →  #tabs-viewports-wrapper  (1fr, the web content area)
+      grid-column 2  →  #ai-chat-sidebar         (300px, always on the RIGHT)
+
+    Grid coordinates are hard-coded with !important — no flex reordering,
+    no WebKit paint-order quirk, and no JS innerHTML overwrite can
+    displace any zone.  Dynamic content lives exclusively in #web-view.
+    MutationObserver in app.js watches #workspace-body direct children.
+  -->
+  <div id="app-container">
+
+    <!-- ══ Grid Row 1: Navigation Toolbar ═══════════════════════════ -->
+    <div id="navigation-toolbar">
+
+      <!-- Sub-row A: nav buttons + address bar + status -->
+      <div id="nav-row">
+        <div class="nav-left">
+          <button id="back-btn"    class="nav-btn" title="Back">◀</button>
+          <button id="forward-btn" class="nav-btn" title="Forward">▶</button>
+          <button id="refresh-btn" class="nav-btn" title="Refresh">↺</button>
+        </div>
+
+        <div class="nav-center">
+          <div class="address-row">
+            <input type="text" id="address-bar"
+              placeholder="Type a URL, a search, or start with '?' to ask Nabu…">
+            <div class="context-hint" id="context-hint"
+              title="Highlight text on a page to trigger Nabu context actions">
+              <span class="context-hint-icon">⌗</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="nav-right">
+          <button class="ai-status-btn" id="ai-status-btn"
+            title="Click to toggle Local AI connection">
+            <span class="status-dot pulse" id="status-dot"></span>
+            <span id="status-label">Local AI Ready</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Sub-row B: tab strip -->
+      <div id="tab-bar-container">
+        <button class="tab-group-btn" id="tab-group-btn"
+          title="Group open tabs using AI">🧬 Group</button>
+
+        <!--
+          .tabs-control-row: inline flex track that keeps #tabs-header-container
+          and #add-tab-btn travelling together at all times.
+
+          JS appends tab pills to #tabs-header-container via _buildPill().
+          #add-tab-btn is immediately after the container so the "+" button
+          is always visually adjacent to the last open tab — never detached.
+        -->
+        <div class="tabs-control-row">
+          <div id="tabs-header-container">
+            <!-- #add-tab-btn lives here so it travels with the tabs.
+                 CSS order: 9999 keeps it visually after every pill
+                 even though JS appends new pills after it in the DOM. -->
+            <button id="add-tab-btn" class="tab-add-btn" title="Open new tab">+</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <!-- /navigation-toolbar -->
+
+    <!-- ══ Grid Row 2: Workspace Body ════════════════════════════════ -->
+    <div id="workspace-body">
+
+      <!-- Grid Column 1: AI Chat Sidebar — ALWAYS on the LEFT -->
+      <div id="ai-chat-sidebar">
+        <div class="sidebar-tabs">
+          <button class="sidebar-tab-btn active" id="tab-assistant"
+            onclick="switchSidebarView('assistant')">AI Assistant</button>
+          <button class="sidebar-tab-btn" id="tab-logs"
+            onclick="switchSidebarView('logs')">System Logs</button>
+        </div>
+
+        <div class="sidebar-view" id="view-assistant">
+          <select id="feature-select" class="feature-select" onchange="onFeatureChange()">
+            <option value="chat">💬  General Chat</option>
+            <option value="research">🔍  Objective Research Agent</option>
+          </select>
+
+          <div id="chat-history-output" class="chat-space"></div>
+
+          <div id="chat-input-row" class="input-area">
+            <div class="input-row">
+              <textarea id="ai-chat-input" class="sidebar-textarea"
+                placeholder="Ask Nabu anything…" rows="3"></textarea>
+              <button id="send-chat-btn" class="send-btn" title="Send (Enter)">↑</button>
+            </div>
+            <div class="input-hint">Enter to send &nbsp;·&nbsp; Shift+Enter for new line</div>
+          </div>
+        </div>
+
+        <div class="sidebar-view hidden" id="view-logs">
+          <div class="log-panel" id="ai-log-box"></div>
+        </div>
+      </div>
+      <!-- /ai-chat-sidebar -->
+
+      <!-- Grid Column 2: Web Viewport -->
+      <div id="tabs-viewports-wrapper">
+        <div id="router-banner" role="status" aria-live="polite" hidden></div>
+        <!--
+          .tab-content: isolates the iframe inside hard boundaries so it
+          can never expand or paint outside its allocated grid cell.
+
+          allow-same-origin is ABSENT: the iframe has a null/opaque origin so
+          its scripts cannot access window.parent.document and cannot hide or
+          remove browser chrome elements.
+
+          allow-top-navigation is ABSENT: WebKit2GTK fires its C++ navigation
+          policy handler *after* the sandbox permits a top-frame navigation
+          request, and pywebview calls decision.use() which navigates the main
+          window regardless of any JavaScript setter.  Keeping this flag out
+          ensures the sandbox blocks the request before pywebview ever sees it.
+          JS-redirect intermediaries (e.g. duco.duckduckgo.com) are handled at
+          the Python proxy level: requests.get() follows all HTTP redirects and
+          returns the final page HTML, so the blank redirect page is never shown.
+        -->
+        <div class="tab-content">
+          <iframe id="web-view"
+            sandbox="allow-scripts allow-forms allow-popups"
+          ></iframe>
+        </div>
+      </div>
+      <!-- /tabs-viewports-wrapper -->
+
+    </div>
+    <!-- /workspace-body -->
+
+  </div>
+  <!-- /app-container -->
+
+  <script src="app.js"></script>
+</body>
+</html>

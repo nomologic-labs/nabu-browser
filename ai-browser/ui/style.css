@@ -1,0 +1,715 @@
+/* ════════════════════════════════════════════════════════════════
+   Nabu Browser — Warm Editorial Design System
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── Design Tokens ──────────────────────────────────────────── */
+:root {
+  --bg_app:       #fcfaf7;
+  --bg_sidebar:   #f5f0e6;
+  --bg_card:      #ffffff;
+  --accent:       #d47a55;
+  --accent_hover: #b85f3b;
+  --divider:      #e6dfd3;
+  --text_main:    #2b2621;
+  --text_muted:   #7c7267;
+  --focus_ring:   rgba(212, 122, 85, 0.2);
+
+  --nav-h:      52px;
+  --tabbar-h:   36px;
+  --shell-h:    88px; /* nav + tabbar */
+
+  --font-ui:   system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+}
+
+/* ── Reset & Base ───────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width:    100vw !important;
+  height:   100vh !important;
+  margin:   0     !important;
+  padding:  0     !important;
+  overflow: hidden !important;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  background-color: var(--bg_app);
+  color: var(--text_main);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   APP CONTAINER  — CSS Grid skeleton, two hard-wired rows:
+     Row 1 (auto)  →  #navigation-toolbar
+     Row 2 (1fr)   →  #workspace-body
+   Grid coordinates are enforced with !important so no WebKit
+   repaint cycle, flex reorder, or JS style injection can move
+   any zone out of its allocated slot.
+   ════════════════════════════════════════════════════════════════ */
+
+#app-container {
+  display:               grid !important;
+  grid-template-rows:    auto 1fr !important;
+  width:                 100vw !important;
+  height:                100vh !important;
+  overflow:              hidden !important;
+  /* Independent stacking context — iframe descendants cannot paint
+     above the toolbar regardless of their z-index value. */
+  isolation:  isolate;
+  position:   relative;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   NAVIGATION TOOLBAR  (nav row 52px + tab bar 36px = 88px)
+   ════════════════════════════════════════════════════════════════ */
+
+#navigation-toolbar {
+  /* Occupies grid row 1. Height is automatic (content-driven).
+     z-index !important ensures the toolbar always paints above
+     the iframe stacking context during WebKit2GTK srcdoc injection. */
+  grid-row:   1 !important;
+  width:      100%;
+  display:    flex;
+  flex-direction: column;
+  z-index:    99999 !important;
+  position:   relative;
+  background: var(--bg_sidebar);
+  border-bottom: 1px solid var(--divider);
+}
+
+/* ── Navigation Row (52 px) ─────────────────────────────────── */
+
+#nav-row {
+  height: var(--nav-h);
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  padding: 0 14px;
+  gap: 10px;
+  border-bottom: 1px solid var(--divider);
+}
+
+/* ── Left: Nav Buttons ──────────────────────────────────────── */
+.nav-left {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  justify-self: start;
+}
+
+.nav-btn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  color: var(--text_muted);
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1;
+  transition: background 0.13s ease, color 0.13s ease;
+  user-select: none;
+  flex-shrink: 0;
+}
+.nav-btn:hover  { background: var(--divider); color: var(--text_main); }
+.nav-btn:active { background: #ddd8ce; }
+
+/* ── Center: Address Row ────────────────────────────────────── */
+.nav-center {
+  width: 580px;
+  max-width: 100%;
+}
+
+.address-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#address-bar {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  background: var(--bg_card);
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  color: var(--text_main);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 0 12px;
+  outline: none;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+#address-bar::placeholder { color: var(--text_muted); }
+#address-bar:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus_ring);
+}
+
+/* Context action hint */
+.context-hint {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1.5px dashed var(--divider);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+  flex-shrink: 0;
+  opacity: 0.45;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+.context-hint:hover { opacity: 1; border-color: var(--text_muted); }
+.context-hint-icon  { font-size: 11px; color: var(--text_muted); line-height: 1; user-select: none; }
+.context-hint.active {
+  opacity: 1;
+  border-color: var(--accent);
+  border-style: solid;
+  background: #fdf0ea;
+}
+.context-hint.active .context-hint-icon { color: var(--accent); }
+
+/* ── Right: Go + AI Status ──────────────────────────────────── */
+.nav-right {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-status-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: transparent;
+  border: 1px solid var(--divider);
+  border-radius: 20px;
+  padding: 5px 12px 5px 9px;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text_muted);
+  white-space: nowrap;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+.ai-status-btn:hover {
+  background: var(--divider);
+  border-color: #cdc6ba;
+  color: var(--text_main);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2ecc71;
+  flex-shrink: 0;
+  transition: background 0.3s ease;
+}
+.status-dot.pulse {
+  animation: emerald-pulse 2.8s ease-in-out infinite;
+}
+@keyframes emerald-pulse {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(46, 204, 113, 0.5); }
+  50%       { box-shadow: 0 0 0 4px rgba(46, 204, 113, 0);   }
+}
+
+/* ── Tab Strip Row (36 px) ──────────────────────────────────── */
+
+#tab-bar-container {
+  /* Flex item — never shrinks; always occupies its full 36 px row. */
+  flex-shrink: 0;
+  height: var(--tabbar-h);
+  display: flex;
+  align-items: center;
+  padding: 0 6px 0 4px;
+  gap: 0;
+  overflow: hidden;
+  border-bottom: 1px solid var(--divider);
+  background: var(--bg_sidebar);
+}
+
+/* Group button — leftmost anchor */
+.tab-group-btn {
+  height: 26px;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--divider);
+  border-radius: 5px;
+  color: var(--text_muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  margin-right: 8px;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+.tab-group-btn:hover {
+  background: #fdf0ea;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.tab-group-btn:active { background: #fce4d8; }
+
+/* Individual tab pill */
+.tab-pill {
+  height: calc(var(--tabbar-h) - 0px);
+  min-width: 120px;
+  max-width: 200px;
+  padding: 0 10px 0 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-top: 2px solid transparent;
+  background: transparent;
+  color: var(--text_muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  border-radius: 5px 5px 0 0;
+  transition: background 0.13s ease, color 0.13s ease;
+  margin-bottom: -1px; /* overlap container border-bottom */
+  position: relative;
+}
+.tab-pill:hover {
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--text_main);
+}
+.tab-pill.active {
+  background: var(--bg_card);
+  border-color: var(--divider);
+  border-bottom-color: var(--bg_card); /* connect visually to the viewport */
+  border-top-color: var(--accent);
+  color: var(--text_main);
+  font-weight: 600;
+}
+
+.tab-favicon {
+  font-size: 11px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+.tab-close {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  color: var(--text_muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  padding: 0;
+  transition: opacity 0.13s ease, background 0.13s ease;
+}
+.tab-pill:hover .tab-close   { opacity: 1; }
+.tab-pill.active .tab-close  { opacity: 0.6; }
+.tab-close:hover {
+  background: var(--divider);
+  color: var(--text_main);
+  opacity: 1 !important;
+}
+
+/* Go button — sits in nav-right between the address bar and AI status */
+.go-btn {
+  min-width: 36px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  margin-right: 6px;
+}
+.go-btn:hover { background: var(--divider); color: var(--text_main); }
+
+/* Horizontal flex track that keeps the tab pills container and the
+   "+" button travelling inline together.  flex: 1 fills all remaining
+   space in #tab-bar-container after the Group button.               */
+.tabs-control-row {
+  display:     flex !important;
+  align-items: center !important;
+  gap:         8px !important;
+  flex:        1;
+  overflow:    hidden;
+  height:      100%;
+}
+
+/* Scrollable container for tab pills — grows with content, scrolls
+   horizontally when tabs overflow.  Does NOT fill the whole row so
+   #add-tab-btn stays adjacent rather than at the far edge.          */
+#tabs-header-container {
+  display:     flex !important;
+  align-items: center !important;
+  gap:         2px;
+  height:      100%;
+  overflow-x:  auto;
+  overflow-y:  hidden;
+  /* flex: 1 here so the container fills the .tabs-control-row minus
+     the fixed-width #add-tab-btn, keeping the "+" at the near edge. */
+  flex:        1;
+}
+#tabs-header-container::-webkit-scrollbar { display: none; }
+
+/* #add-tab-btn lives inside #tabs-header-container.
+   order: 9999 keeps it visually last (after all pills with default
+   order: 0) no matter when JS appends new pills to the container.  */
+#add-tab-btn {
+  order: 9999;
+}
+
+/* Add tab button — flex-shrink: 0 keeps it from being squeezed away */
+.tab-add-btn {
+  width:       26px;
+  height:      26px;
+  flex-shrink: 0 !important;
+  background:  transparent;
+  border:      1px solid var(--divider);
+  border-radius: 50%;
+  color:       var(--text_muted);
+  font-size:   17px;
+  line-height: 1;
+  cursor:      pointer;
+  display:     inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  transition:  background 0.13s ease, color 0.13s ease;
+}
+.tab-add-btn:hover { background: var(--divider); color: var(--text_main); }
+
+/* ════════════════════════════════════════════════════════════════
+   WORKSPACE BODY  — CSS Grid, two hard-wired columns:
+     Column 1 (300px)  →  #ai-chat-sidebar  (always LEFT)
+     Column 2 (1fr)    →  #tabs-viewports-wrapper
+   Occupies grid-row 2 of #app-container.
+   ════════════════════════════════════════════════════════════════ */
+
+#workspace-body {
+  grid-row:              2 !important;
+  display:               grid !important;
+  grid-template-columns: 300px 1fr !important;
+  height:                100% !important;
+  min-height:            0 !important;
+  overflow:              hidden !important;
+  position:              relative;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   AI CHAT SIDEBAR — Grid Column 1, always on the LEFT
+   grid-column: 1 !important is a hard coordinate that no WebKit
+   reorder, flex quirk, or JS style injection can override.
+   ════════════════════════════════════════════════════════════════ */
+
+#ai-chat-sidebar {
+  grid-column:    1 !important;
+  height:         100% !important;
+  background:     var(--bg_sidebar);
+  border-right:   1px solid var(--divider);
+  display:        flex !important;
+  flex-direction: column !important;
+  overflow:       hidden !important;
+  position:       relative;
+  z-index:        10;
+}
+
+/* ── Sidebar Tab Switcher ───────────────────────────────────── */
+.sidebar-tabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--divider);
+  background: var(--bg_sidebar);
+}
+
+.sidebar-tab-btn {
+  flex: 1;
+  height: 42px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text_muted);
+  cursor: pointer;
+  letter-spacing: 0.01em;
+  transition: color 0.14s ease, border-color 0.14s ease;
+  margin-bottom: -1px;
+}
+.sidebar-tab-btn:hover { color: var(--text_main); }
+.sidebar-tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ── Sidebar View Panels ────────────────────────────────────── */
+.sidebar-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 14px;
+  gap: 10px;
+}
+.sidebar-view.hidden { display: none; }
+
+/* ── Feature Mode Dropdown ──────────────────────────────────── */
+.feature-select {
+  width: 100%;
+  height: 38px;
+  flex-shrink: 0;
+  background: var(--bg_card);
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  color: var(--text_main);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 0 28px 0 10px;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%237c7267'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  box-shadow: 0 1px 3px rgba(43, 38, 33, 0.04);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.feature-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus_ring);
+}
+.feature-select option { background: var(--bg_card); color: var(--text_main); font-weight: 400; }
+
+/* ── Dynamic Chat Space ─────────────────────────────────────── */
+.chat-space {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg_card);
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.chat-space::-webkit-scrollbar          { width: 4px; }
+.chat-space::-webkit-scrollbar-track    { background: transparent; }
+.chat-space::-webkit-scrollbar-thumb    { background: var(--divider); border-radius: 2px; }
+.chat-space::-webkit-scrollbar-thumb:hover { background: #cdc6ba; }
+.chat-space:empty::after {
+  content: 'Your conversation will appear here.';
+  color: var(--text_muted);
+  font-size: 12px;
+  line-height: 1.6;
+  display: block;
+  text-align: center;
+  margin: auto;
+  padding: 20px 0;
+  opacity: 0.7;
+}
+
+/* ── Chat Message Bubbles ───────────────────────────────────── */
+.chat-message { display: flex; flex-direction: column; gap: 2px; }
+.chat-message.user      { align-items: flex-end; }
+.chat-message.assistant { align-items: flex-start; }
+
+.bubble {
+  max-width: 92%;
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.chat-message.user .bubble {
+  background: var(--accent);
+  color: #ffffff;
+  border-radius: 10px 10px 3px 10px;
+}
+.chat-message.assistant .bubble {
+  background: var(--bg_app);
+  color: var(--text_main);
+  border: 1px solid var(--divider);
+  border-radius: 3px 10px 10px 10px;
+}
+
+/* ── Input Dock ─────────────────────────────────────────────── */
+.input-area {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 7px;
+}
+.sidebar-textarea {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg_card);
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  color: var(--text_main);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 9px 11px;
+  resize: none;
+  outline: none;
+  line-height: 1.5;
+  max-height: 120px;
+  overflow-y: auto;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.sidebar-textarea::placeholder { color: var(--text_muted); }
+.sidebar-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus_ring);
+}
+.send-btn {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  background: var(--accent);
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.14s ease, transform 0.1s ease;
+}
+.send-btn:hover  { background: var(--accent_hover); }
+.send-btn:active { transform: scale(0.93); }
+
+.input-hint {
+  font-size: 10px;
+  color: var(--text_muted);
+  text-align: right;
+  padding-right: 2px;
+  opacity: 0.7;
+}
+
+/* ── System Logs Panel ──────────────────────────────────────── */
+.log-panel {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg_app);
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text_muted);
+  line-height: 1.65;
+}
+.log-panel::-webkit-scrollbar          { width: 4px; }
+.log-panel::-webkit-scrollbar-track    { background: transparent; }
+.log-panel::-webkit-scrollbar-thumb    { background: var(--divider); border-radius: 2px; }
+.log-panel:empty::after {
+  content: 'No events yet.';
+  display: block;
+  text-align: center;
+  padding: 20px 0;
+  opacity: 0.5;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   UTILITY BUTTONS
+   ════════════════════════════════════════════════════════════════ */
+
+.btn-accent {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 13px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+  white-space: nowrap;
+}
+.btn-accent:hover  { background: var(--accent_hover); }
+.btn-accent:active { transform: scale(0.98); }
+
+/* ════════════════════════════════════════════════════════════════
+   WEB VIEWPORT  — Grid Column 1
+   ════════════════════════════════════════════════════════════════ */
+
+#tabs-viewports-wrapper {
+  /* grid-column: 2 is the hard coordinate for the content pane. */
+  grid-column: 2 !important;
+  height:      100% !important;
+  min-width:   0;
+  position:    relative !important;
+  overflow:    hidden !important;
+  background:  var(--bg_card);
+}
+
+/* .tab-content: hard boundary box that locks the iframe inside its
+   cell and prevents it from expanding or painting outside.          */
+.tab-content {
+  width:    100% !important;
+  height:   100% !important;
+  position: relative !important;
+  overflow: hidden !important;
+}
+
+.tab-content iframe {
+  position: absolute !important;
+  top:      0 !important;
+  left:     0 !important;
+  width:    100% !important;
+  height:   100% !important;
+  border:   none !important;
+  display:  block;
+  z-index:  1 !important;
+}
+
+/* Keep the legacy #web-view rule so app.js getElementById('web-view')
+   still works without any JS changes.                               */
+#web-view {
+  background: var(--bg_card);
+}

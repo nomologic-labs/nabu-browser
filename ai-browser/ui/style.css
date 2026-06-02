@@ -183,6 +183,37 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.ai-model-select {
+  max-width: 148px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--bg_card);
+  color: var(--text_main);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  flex-shrink: 1;
+  min-width: 0;
+  text-overflow: ellipsis;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease;
+}
+.ai-model-select:hover:not(:disabled) {
+  border-color: #cdc6ba;
+}
+.ai-model-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus_ring);
+}
+.ai-model-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .ai-status-btn {
@@ -206,6 +237,10 @@ html, body {
   background: var(--divider);
   border-color: #cdc6ba;
   color: var(--text_main);
+}
+.ai-status-btn.offline {
+  border-color: #d5d0c8;
+  color: #9a9288;
 }
 
 .status-dot {
@@ -647,8 +682,47 @@ html, body {
 }
 
 /* ── System Logs Panel ──────────────────────────────────────── */
+.logs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.btn-log-action {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--divider);
+  background: var(--bg_app);
+  color: var(--text_main);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+.btn-log-action:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: #ffffff;
+}
+.btn-log-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn-log-caution:hover:not(:disabled) {
+  border-color: #c0392b;
+  color: #c0392b;
+}
+
 .log-panel {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   background: var(--bg_app);
   border: 1px solid var(--divider);

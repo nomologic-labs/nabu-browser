@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import sqlite3
 import threading
@@ -12,6 +14,7 @@ import webview
 
 
 class NabuAPI:
+    DEFAULT_MODEL = "llama3.2:3b"
 
     def __init__(self):
         # 1. Setup local database paths
@@ -22,7 +25,9 @@ class NabuAPI:
         self.db_path = os.path.join(self.base_dir, "nabu.db")
 
         # 2. Setup Ollama endpoint
-        self.ollama_url = "http://127.0.0.1:11434/api/generate"
+        self.ollama_root = "http://127.0.0.1:11434"
+        self.ollama_url = f"{self.ollama_root}/api/generate"
+        self._ollama_restart_in_progress = False
 
         # 3. Initialize the database immediately on boot
         self._init_db()
@@ -30,7 +35,255 @@ class NabuAPI:
         # Set after webview.create_window(); used by the research agent for evaluate_js.
         self.window = None
 
+        # User-toggleable gate for all Ollama-backed features (toolbar "Local AI" button).
+        self._ai_enabled = True
+        self._active_model = self.DEFAULT_MODEL
+        self._ai_lock = threading.Lock()
+        self._load_active_model_setting()
+
         print(f"[Nabu Backend] Connected to local memory bank at: {self.db_path}")
+        print(f"[Nabu Backend] Active Ollama model: {self._active_model}")
+
+    def _ai_is_enabled(self):
+        with self._ai_lock:
+            return self._ai_enabled
+
+    def set_ai_enabled(self, enabled):
+        """Sync backend AI gate with the toolbar toggle."""
+        with self._ai_lock:
+            self._ai_enabled = bool(enabled)
+            state = self._ai_enabled
+        print(f"[Nabu Backend] Local AI {'enabled' if state else 'disabled'}")
+        return {"status": "success", "enabled": state}
+
+    def get_ai_enabled(self):
+        with self._ai_lock:
+            return {"status": "success", "enabled": self._ai_enabled}
+
+    def _get_active_model(self):
+        with self._ai_lock:
+            return self._active_model
+
+    def get_active_model(self):
+        return {"status": "success", "model": self._get_active_model()}
+
+    def set_active_model(self, model_name):
+        """Persist and use the selected Ollama model for all AI features."""
+        model_name = str(model_name).strip()
+        if not model_name:
+            return {"status": "error", "message": "Model name was empty."}
+        with self._ai_lock:
+            self._active_model = model_name
+        self._persist_setting("active_model", model_name)
+        print(f"[Nabu Backend] Active Ollama model → {model_name}")
+        return {"status": "success", "model": model_name}
+
+    def _fetch_installed_model_names(self):
+        try:
+            response = requests.get(f"{self.ollama_root}/api/tags", timeout=5)
+            response.raise_for_status()
+            payload = response.json()
+            names = [
+                str(m.get("name", "")).strip()
+                for m in payload.get("models", [])
+                if isinstance(m, dict) and m.get("name")
+            ]
+            return sorted(set(names), key=str.lower)
+        except Exception as exc:
+            print(f"[Ollama] Could not list models: {exc}")
+            return []
+
+    def list_ollama_models(self):
+        """Return installed model tags and the currently selected model."""
+        models = self._fetch_installed_model_names()
+        active = self._get_active_model()
+        if active and active not in models:
+            models = sorted(set(models) | {active}, key=str.lower)
+        return {
+            "status": "success",
+            "models": models,
+            "active_model": active,
+        }
+
+    def _model_is_installed(self, model_name, installed_names):
+        if not model_name:
+            return False
+        if model_name in installed_names:
+            return True
+        return any(
+            name == model_name or name.startswith(f"{model_name}:")
+            for name in installed_names
+        )
+
+    def _ollama_generate(self, prompt, timeout=30):
+        """Run a single non-streaming generate call with the active model."""
+        model = self._get_active_model()
+        response = requests.post(
+            self.ollama_url,
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json().get("response", "").strip()
+
+    def _ui_log(self, message):
+        """Append a line to the System Logs panel from Python."""
+        if self.window is None:
+            return
+        payload = json.dumps(str(message))
+        self._eval_js(f"typeof app !== 'undefined' && app.log({payload})")
+
+    def check_ollama_health(self):
+        """Probe Ollama HTTP API and report whether the configured model is present."""
+        try:
+            response = requests.get(f"{self.ollama_root}/api/tags", timeout=5)
+            response.raise_for_status()
+            payload = response.json()
+            models = [
+                str(m.get("name", "")).strip()
+                for m in payload.get("models", [])
+                if isinstance(m, dict)
+            ]
+            selected = self._get_active_model()
+            has_selected = self._model_is_installed(selected, models)
+            if has_selected:
+                message = (
+                    f"Ollama is reachable at {self.ollama_root}. "
+                    f"Selected model “{selected}” is available."
+                )
+            else:
+                listed = ", ".join(models[:5]) if models else "(none)"
+                message = (
+                    f"Ollama is running but “{selected}” was not found. "
+                    f"Installed: {listed}. Run: ollama pull {selected}"
+                )
+            return {
+                "status": "success",
+                "healthy": True,
+                "has_required_model": has_selected,
+                "required_model": selected,
+                "models": models,
+                "message": message,
+            }
+        except requests.ConnectionError:
+            selected = self._get_active_model()
+            return {
+                "status": "error",
+                "healthy": False,
+                "has_required_model": False,
+                "required_model": selected,
+                "models": [],
+                "message": (
+                    f"Cannot connect to Ollama at {self.ollama_root}. "
+                    "Start it with: ollama serve"
+                ),
+            }
+        except Exception as exc:
+            selected = self._get_active_model()
+            return {
+                "status": "error",
+                "healthy": False,
+                "has_required_model": False,
+                "required_model": selected,
+                "models": [],
+                "message": f"Health check failed: {exc}",
+            }
+
+    def restart_ollama(self):
+        """Best-effort Ollama restart on a background thread (non-blocking)."""
+        if self._ollama_restart_in_progress:
+            return {"status": "error", "message": "An Ollama restart is already in progress."}
+        threading.Thread(target=self._restart_ollama_worker, daemon=True).start()
+        return {"status": "started", "message": "Ollama restart started. Watch System Logs for progress."}
+
+    def _run_subprocess(self, cmd, timeout=20):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            detail = (result.stdout or "") + (result.stderr or "")
+            return result.returncode == 0, detail.strip()
+        except Exception as exc:
+            return False, str(exc)
+
+    def _wait_for_ollama(self, deadline_seconds=45):
+        deadline = time.time() + deadline_seconds
+        while time.time() < deadline:
+            try:
+                response = requests.get(f"{self.ollama_root}/api/tags", timeout=3)
+                if response.status_code == 200:
+                    return True
+            except requests.RequestException:
+                pass
+            time.sleep(1)
+        return False
+
+    def _restart_ollama_worker(self):
+        self._ollama_restart_in_progress = True
+        try:
+            self._ui_log("[Ollama] Restart requested…")
+
+            restarted = False
+            if shutil.which("systemctl"):
+                ok, detail = self._run_subprocess(
+                    ["systemctl", "--user", "restart", "ollama"],
+                    timeout=40,
+                )
+                if ok:
+                    self._ui_log("[Ollama] systemctl --user restart ollama succeeded.")
+                    restarted = True
+                elif detail:
+                    self._ui_log(f"[Ollama] systemctl restart skipped: {detail[:200]}")
+
+            if not restarted:
+                if shutil.which("pkill"):
+                    self._run_subprocess(["pkill", "-x", "ollama"], timeout=5)
+                    time.sleep(1.5)
+                    self._ui_log("[Ollama] Stopped existing ollama process(es).")
+
+                ollama_bin = shutil.which("ollama")
+                if not ollama_bin:
+                    self._ui_log(
+                        "[Ollama] ✗ Could not find “ollama” in PATH. "
+                        "Install Ollama or restart it manually."
+                    )
+                    return
+
+                try:
+                    subprocess.Popen(
+                        [ollama_bin, "serve"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                    self._ui_log("[Ollama] Launched: ollama serve")
+                    restarted = True
+                except Exception as exc:
+                    self._ui_log(f"[Ollama] ✗ Failed to start ollama serve: {exc}")
+                    return
+
+            self._ui_log("[Ollama] Waiting for API to become ready…")
+            if self._wait_for_ollama(45):
+                health = self.check_ollama_health()
+                self._ui_log(f"[Ollama] ✓ {health.get('message', 'Ready.')}")
+                self._eval_js(
+                    "typeof window.refreshModelSelect === 'function' && window.refreshModelSelect()"
+                )
+            else:
+                self._ui_log(
+                    "[Ollama] ✗ Timed out waiting for API. "
+                    "Try: ollama serve  (or systemctl --user start ollama)"
+                )
+        except Exception as exc:
+            self._ui_log(f"[Ollama] ✗ Restart error: {exc}")
+        finally:
+            self._ollama_restart_in_progress = False
+            self._eval_js(
+                "typeof window.onOllamaRestartDone === 'function' && window.onOllamaRestartDone()"
+            )
 
     def test_connection(self, message):
         """A simple function to verify the bridge works"""
@@ -39,14 +292,11 @@ class NabuAPI:
 
     def get_ai_keywords(self, vague_query):
         """Feature 1: Quick test to see if Ollama responds"""
+        if not self._ai_is_enabled():
+            return "Local AI is turned off."
         prompt = f"Convert this memory into 2-3 search keywords. Output ONLY keywords: '{vague_query}'"
         try:
-            response = requests.post(
-                self.ollama_url,
-                json={"model": "llama3.2:3b", "prompt": prompt, "stream": False},
-                timeout=10
-            )
-            return response.json().get("response", "").strip()
+            return self._ollama_generate(prompt, timeout=10)
         except Exception as e:
             return f"Error connecting to Ollama: {str(e)}"
 
@@ -58,24 +308,31 @@ class NabuAPI:
         query = str(query).strip()
         if not query:
             return {"status": "error", "keywords": "", "message": "Query was empty"}
+        if not self._ai_is_enabled():
+            return {
+                "status": "error",
+                "keywords": query,
+                "message": "Local AI is turned off",
+            }
 
         # System prompt ensuring Ollama acts purely as an optimization tool
         prompt = (
-            "You are a search engine optimization engine. Convert the following vague memory "
-            "or description into 2 to 3 highly precise, space-separated search keywords. "
-            "Output ONLY the raw search keywords. Do not include introductory text, punctuation, "
-            f"or formatting. Memory: '{query}'"
-        )
+                "You are a conceptual search optimization engine. Convert the following vague memory, "
+                "description, or question into the single most accurate entity, product, or term name. "
+                "Look past the words and identify the exact thing the user is trying to find.\n\n"
+                "Examples:\n"
+                "- 'laptop from apple' -> macbook\n"
+                "- 'popular open source Linux based os' -> ubuntu\n"
+                "- 'python library for mathematical graphing' -> matplotlib\n"
+                "- 'a writing instrument that uses ink' -> pen\n"
+                "- 'an open source text editor developed by microsoft' -> vscode\n\n"
+                "Output ONLY the final raw term or name. Do not include introductory text, quotes, "
+                "punctuation, explanations, or markdown code blocks.\n"
+                f"Memory description: '{query}'"
+            )
 
         try:
-            # 1. Fire the request to your local Ollama generation api
-            response = requests.post(self.ollama_url, json={
-                "model": "llama3.2:3b",  # Updated target model
-                "prompt": prompt, 
-                "stream": False
-            }, timeout=10) # 10-second timeout to prevent UI freezes
-            
-            ai_output = response.json().get("response", "").strip()
+            ai_output = self._ollama_generate(prompt, timeout=10)
             
             # FALLBACK: If Ollama responds with an empty string, default back to original query
             if not ai_output:
@@ -131,8 +388,50 @@ class NabuAPI:
         """
         )
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """
+        )
+
         conn.commit()
         conn.close()
+
+    def _load_active_model_setting(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT value FROM app_settings WHERE key = ?",
+                ("active_model",),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if row and row[0]:
+                with self._ai_lock:
+                    self._active_model = str(row[0]).strip()
+        except Exception as exc:
+            print(f"[Settings] Could not load active_model: {exc}")
+
+    def _persist_setting(self, key, value):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO app_settings (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (str(key), str(value)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            print(f"[Settings] Failed to persist {key}: {exc}")
 
     def log_navigation(self, tab_id, url, title="New Tab", page_content=""):
         """
@@ -180,6 +479,14 @@ class NabuAPI:
         user_message = str(user_message).strip()
         if not user_message:
             return {"status": "error", "response": "Message was empty."}
+        if not self._ai_is_enabled():
+            return {
+                "status": "error",
+                "response": (
+                    "Local AI is turned off. Click “Local AI Offline” in the toolbar "
+                    "to turn it back on."
+                ),
+            }
 
         # 1. Fetch the last 5 history items including full text body content
         history_context = ""
@@ -223,17 +530,7 @@ class NabuAPI:
         full_prompt = f"{system_instructions}\nUser Question: {user_message}\nAssistant:"
 
         try:
-            response = requests.post(
-                self.ollama_url,
-                json={
-                    "model": "llama3.2:3b",
-                    "prompt": full_prompt,
-                    "stream": False,
-                },
-                timeout=30,
-            )
-
-            ai_response = response.json().get("response", "").strip()
+            ai_response = self._ollama_generate(full_prompt, timeout=30)
             return {"status": "success", "response": ai_response}
 
         except Exception as e:
@@ -294,6 +591,12 @@ class NabuAPI:
         the resulting groups in the tab strip via evaluate_js.
         """
         try:
+            if not self._ai_is_enabled():
+                return {
+                    "status": "error",
+                    "message": "Local AI is turned off",
+                    "groups": [],
+                }
             tabs = json.loads(tabs_json or "[]")
             if not isinstance(tabs, list) or not tabs:
                 return {"status": "error", "message": "No tabs to organize", "groups": []}
@@ -326,12 +629,7 @@ class NabuAPI:
                 "Open tabs:\n" + "\n".join(tab_lines)
             )
 
-            response = requests.post(
-                self.ollama_url,
-                json={"model": "llama3.2:3b", "prompt": system_prompt, "stream": False},
-                timeout=90,
-            )
-            ai_output = response.json().get("response", "").strip()
+            ai_output = self._ollama_generate(system_prompt, timeout=90)
             if not ai_output:
                 raise ValueError("Ollama returned an empty response")
 
@@ -599,6 +897,8 @@ class NabuAPI:
         goal = str(goal).strip()
         if not goal:
             return {"status": "error", "message": "Research goal was empty."}
+        if not self._ai_is_enabled():
+            return {"status": "error", "message": "Local AI is turned off"}
         if self.window is None:
             return {"status": "error", "message": "Browser window is not ready."}
 
@@ -634,6 +934,8 @@ class NabuAPI:
 
     def _generate_research_search_query(self, goal):
         """Ask Ollama for a single clean search-engine query string."""
+        if not self._ai_is_enabled():
+            return goal
         prompt = (
             "You are a search query optimizer. Given a high-level research goal, "
             "output ONLY one concise search-engine query string (no quotes, no explanation, "
@@ -641,12 +943,7 @@ class NabuAPI:
             f"Research goal: {goal}"
         )
         try:
-            response = requests.post(
-                self.ollama_url,
-                json={"model": "llama3.2:3b", "prompt": prompt, "stream": False},
-                timeout=30,
-            )
-            query = response.json().get("response", "").strip()
+            query = self._ollama_generate(prompt, timeout=30)
             query = re.sub(r'^["\']+|["\']+$', "", query)
             query = query.split("\n")[0].strip()
             return query or goal
@@ -786,6 +1083,12 @@ class NabuAPI:
         """Autonomous multi-turn browse → scrape → synthesize loop."""
         collected = []
         try:
+            if not self._ai_is_enabled():
+                self._agent_ui_result(
+                    "Local AI was turned off. Enable it from the toolbar to run the research agent."
+                )
+                return
+
             self._agent_ui_status("Agent thinking… generating search query")
             search_query = self._generate_research_search_query(goal)
             print(f"[Research Agent] Search query: {search_query}")
@@ -835,6 +1138,12 @@ class NabuAPI:
                 )
                 return
 
+            if not self._ai_is_enabled():
+                self._agent_ui_result(
+                    "Local AI was turned off before synthesis could finish."
+                )
+                return
+
             self._agent_ui_status("Agent synthesizing final research report…")
             sources_block = ""
             for i, src in enumerate(collected, start=1):
@@ -855,16 +1164,7 @@ class NabuAPI:
             )
 
             try:
-                response = requests.post(
-                    self.ollama_url,
-                    json={
-                        "model": "llama3.2:3b",
-                        "prompt": synthesis_prompt,
-                        "stream": False,
-                    },
-                    timeout=120,
-                )
-                final_text = response.json().get("response", "").strip()
+                final_text = self._ollama_generate(synthesis_prompt, timeout=120)
             except Exception as exc:
                 print(f"[Research Agent] Synthesis failed: {exc}")
                 final_text = (

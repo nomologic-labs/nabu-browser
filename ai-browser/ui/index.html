@@ -105,6 +105,10 @@
         </div>
 
         <div class="nav-right">
+          <select id="ai-model-select" class="ai-model-select"
+            title="Ollama model used for ? search, chat, organize, and research">
+            <option value="llama3.2:3b">llama3.2:3b</option>
+          </select>
           <button class="ai-status-btn" id="ai-status-btn"
             title="Click to toggle Local AI connection">
             <span class="status-dot pulse" id="status-dot"></span>
@@ -178,6 +182,16 @@
         </div>
 
         <div class="sidebar-view hidden" id="view-logs">
+          <div class="logs-toolbar">
+            <button type="button" id="ollama-health-btn" class="btn-log-action"
+              title="Check whether Ollama is running and the selected model is installed">
+              Check Ollama
+            </button>
+            <button type="button" id="ollama-restart-btn" class="btn-log-action btn-log-caution"
+              title="Restart the local Ollama service (best-effort)">
+              Restart Ollama
+            </button>
+          </div>
           <div class="log-panel" id="ai-log-box"></div>
         </div>
       </div>

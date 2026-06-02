@@ -41,7 +41,14 @@ On first launch you see the **Nabu Workspace** new-tab page. Open tabs and URLs 
 
 ### Local AI status
 
-The toolbar shows **Local AI Ready** (green dot) or **Local AI Offline** (gray). Click the status button to toggle the indicator. In the prototype, this is mainly a UI flag; AI features still attempt to call Ollama when you use chat or research. If Ollama is not running, those features show connection errors or fall back to simpler behavior (e.g. raw search keywords).
+The toolbar shows **Local AI Ready** (green pulsing dot) or **Local AI Offline** (gray dot). **Click the status button** to turn all AI features on or off:
+
+- **Off:** Sidebar chat and research, tab organize, and `?` query translation are disabled. Plain search and browsing still work; `?` searches use your raw text without AI keyword expansion.
+- **On:** Full AI features are available (requires Ollama running for responses).
+
+### AI model (toolbar)
+
+Next to **Local AI Ready**, the **model dropdown** lists models installed in Ollama (`ollama pull …`). The selection applies to `?` address-bar search, sidebar chat, tab organize, and the research agent. Your choice is saved in `nabu.db` and restored on restart. Use **Check Ollama** in System Logs if a model is missing.
 
 ---
 
@@ -50,7 +57,7 @@ The toolbar shows **Local AI Ready** (green dot) or **Local AI Offline** (gray).
 | Feature | Description |
 |--------|-------------|
 | **Multi-tab browsing** | Open, switch, and close tabs. The last tab cannot be closed. |
-| **New Tab workspace** | Search the web, or jump to quick links (GitHub, localhost, Python docs, Ollama). |
+| **New Tab workspace** | Search the web, or jump to quick links (Nabu GitHub, documentation, Ollama model search). |
 | **Address bar routing** | Enter a URL, a plain search, or an AI-assisted search (see below). |
 | **Python proxy loading** | Every page is fetched on your machine, then shown inside the browser viewport. This enables scraping and avoids many cross-origin limits. |
 | **DuckDuckGo HTML search** | Plain-text and `?` queries use DuckDuckGo’s HTML results (no separate search engine account). |
@@ -60,7 +67,7 @@ The toolbar shows **Local AI Ready** (green dot) or **Local AI Offline** (gray).
 | **AI Organize Tabs** | Groups open tabs by topic using Ollama and colors clusters in the tab strip. |
 | **Session restore** | Open tabs (URL, title, which was active) are saved in a local SQLite database and restored on restart. |
 | **Browsing memory** | Full page text from proxied loads is stored locally for AI context and future history features. |
-| **System Logs** | Sidebar tab with timestamped events (navigation, proxy, AI, session). |
+| **System Logs** | Sidebar tab with timestamped events (navigation, proxy, AI, session). Includes **Check Ollama** and **Restart Ollama** troubleshooting buttons. |
 | **Back / Forward / Refresh** | Back and forward use in-iframe history where possible; refresh reloads the current URL through the proxy. |
 
 ---
@@ -97,6 +104,13 @@ Press **Enter** in the address bar to navigate.
    - **Objective Research Agent** — Set **Max pages** (1–10), enter a goal, send. Progress appears in chat; the final report appears when done. Only one agent run at a time.
 2. **System Logs** — Read technical messages if something fails.
 3. **Send** — **Enter** to send; **Shift+Enter** for a new line in the input.
+
+### System Logs — Ollama troubleshooting
+
+Open **System Logs** in the sidebar:
+
+- **Check Ollama** — Verifies that Ollama responds at `http://127.0.0.1:11434` and that `llama3.2:3b` is installed. Results appear in the log panel.
+- **Restart Ollama** — Best-effort restart (`systemctl --user restart ollama` when available, otherwise `pkill` + `ollama serve`). Confirms before running; may interrupt other apps using Ollama. Not available while the research agent is running.
 
 ### Following links on a page
 
@@ -142,9 +156,9 @@ The research agent picks URLs from DuckDuckGo HTML parsing. It may visit **dead 
 
 Navigation history lives inside the **current tab’s iframe** only. There is no global history UI. Back/forward may do nothing on a fresh tab or after a full proxy reload.
 
-### “Local AI Offline” toggle
+### Research agent interrupted by AI toggle
 
-Toggling offline **does not disable** backend calls to Ollama in all code paths; it mainly changes the status display. For true offline browsing, stop Ollama or disconnect from the network.
+If you turn **Local AI** off while a research agent run is in progress, browsing/scraping may continue but synthesis stops with a notice. Start a new run after turning AI back on.
 
 ### Security and privacy notes (prototype)
 

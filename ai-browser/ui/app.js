@@ -56,10 +56,9 @@ const NEW_TAB_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="links">
-    <a class="link" onclick="window.parent.postMessage({type:'nabu-navigate',url:'https://github.com'},'*')">⚡ GitHub</a>
-    <a class="link" onclick="window.parent.postMessage({type:'nabu-navigate',url:'http://localhost:3000'},'*')">⚙ Localhost</a>
-    <a class="link" onclick="window.parent.postMessage({type:'nabu-navigate',url:'https://docs.python.org/3/'},'*')">📘 Documentation</a>
-    <a class="link" onclick="window.parent.postMessage({type:'nabu-navigate',url:'http://localhost:11434'},'*')">🤖 Ollama</a>
+    <a class="link" onclick="window.parent.postMessage({type:'nabu-navigate',url:'https://github.com/nomologic-labs/nabu-browser'},'*')">⚡ GitHub</a>
+    <a class="link" onclick="window.parent.postMessage({type:'nabu-navigate',url:'https://github.com/nomologic-labs/nabu-browser/tree/main/docs'},'*')">📘 Documentation</a>
+    <a class="link" onclick="window.parent.postMessage({type:'nabu-navigate',url:'https://ollama.com/search'},'*')">🤖 Ollama</a>
   </div>
 </div>
 </body>
@@ -283,6 +282,7 @@ const app = {
     featureMode:    'chat',
     isAiOnline:     true,
     isAgentRunning: false,
+    activeModel:    'llama3.2:3b',
   },
 
   /**
@@ -321,12 +321,16 @@ const app = {
 
 /* ── AI Status Toggle ───────────────────────────────────────── */
 
-function toggleAiStatus() {
-  app.state.isAiOnline = !app.state.isAiOnline;
-  const online = app.state.isAiOnline;
+/** @returns {boolean} True when local AI features are allowed. */
+function isAiOnline() {
+  return app.state.isAiOnline;
+}
 
+/** Sync toolbar dot/label and disable AI-only controls. */
+function applyAiStatusUI(online) {
   const dot   = document.getElementById('status-dot');
   const label = document.getElementById('status-label');
+  const btn   = document.getElementById('ai-status-btn');
 
   if (online) {
     if (dot) {
@@ -334,14 +338,135 @@ function toggleAiStatus() {
       dot.classList.add('pulse');
     }
     if (label) label.textContent = 'Local AI Ready';
-    app.log('Local AI: connection re-established ✓');
+    btn?.classList.remove('offline');
   } else {
     if (dot) {
       dot.style.background = '#95a5a6';
       dot.classList.remove('pulse');
     }
     if (label) label.textContent = 'Local AI Offline';
-    app.log('Local AI: connection terminated ✗');
+    btn?.classList.add('offline');
+  }
+
+  const organizeBtn = document.getElementById('ai-organize-tabs-btn');
+  const sendBtn     = document.getElementById('send-chat-btn');
+  const chatInput   = document.getElementById('ai-chat-input');
+  const featureSel  = document.getElementById('feature-select');
+  const modelSel    = document.getElementById('ai-model-select');
+
+  if (organizeBtn) organizeBtn.disabled = !online;
+  if (sendBtn) sendBtn.disabled = !online;
+  if (chatInput) chatInput.disabled = !online;
+  if (featureSel) featureSel.disabled = !online;
+  if (modelSel) modelSel.disabled = !online;
+}
+
+/* ── Ollama model selection (toolbar) ───────────────────────── */
+
+function _populateModelSelect(select, models, activeModel) {
+  if (!select) return;
+  const previous = activeModel || select.value;
+  select.innerHTML = '';
+
+  const list = Array.isArray(models) && models.length ? models.slice() : [];
+  if (previous && !list.includes(previous)) {
+    list.unshift(previous);
+  }
+  if (!list.length) {
+    const opt = document.createElement('option');
+    opt.value = previous || 'llama3.2:3b';
+    opt.textContent = opt.value;
+    select.appendChild(opt);
+  } else {
+    list.forEach((name) => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      select.appendChild(opt);
+    });
+  }
+
+  if (previous && [...select.options].some(o => o.value === previous)) {
+    select.value = previous;
+  }
+}
+
+/**
+ * Load installed models from Ollama and sync the toolbar dropdown.
+ * Exposed for Python to call after Ollama restart.
+ */
+window.refreshModelSelect = async function refreshModelSelect() {
+  const select = document.getElementById('ai-model-select');
+  if (!select || !window.pywebview?.api?.list_ollama_models) return;
+
+  try {
+    const result = await window.pywebview.api.list_ollama_models();
+    if (result?.status !== 'success') return;
+    _populateModelSelect(select, result.models, result.active_model);
+    if (result.active_model) {
+      app.state.activeModel = result.active_model;
+    }
+  } catch (err) {
+    console.warn('[Model Select] refresh failed:', err);
+  }
+};
+
+async function initModelSelect() {
+  const select = document.getElementById('ai-model-select');
+  if (!select || !window.pywebview?.api?.list_ollama_models) return;
+
+  await window.refreshModelSelect();
+
+  if (window.pywebview?.api?.get_active_model) {
+    try {
+      const current = await window.pywebview.api.get_active_model();
+      if (current?.model) {
+        select.value = current.model;
+        app.state.activeModel = current.model;
+      }
+    } catch (_) { /* keep list_ollama_models selection */ }
+  }
+}
+
+async function onModelSelectChange() {
+  const select = document.getElementById('ai-model-select');
+  if (!select || !isAiOnline()) return;
+
+  const model = select.value;
+  if (!model) return;
+
+  if (window.pywebview?.api?.set_active_model) {
+    try {
+      const result = await window.pywebview.api.set_active_model(model);
+      if (result?.status === 'success') {
+        app.state.activeModel = result.model ?? model;
+        app.log(`[Local AI]: Model → ${app.state.activeModel}`);
+      } else {
+        app.log(`[Local AI]: Could not set model — ${result?.message ?? 'unknown error'}`);
+      }
+    } catch (err) {
+      app.log(`[Local AI]: Model change failed — ${err?.message ?? err}`);
+    }
+  }
+}
+
+async function toggleAiStatus() {
+  const nextOnline = !app.state.isAiOnline;
+  app.state.isAiOnline = nextOnline;
+  applyAiStatusUI(nextOnline);
+
+  if (nextOnline) {
+    app.log('Local AI: enabled ✓');
+  } else {
+    app.log('Local AI: disabled ✗');
+  }
+
+  if (window.pywebview?.api?.set_ai_enabled) {
+    try {
+      await window.pywebview.api.set_ai_enabled(nextOnline);
+    } catch (err) {
+      app.log(`[Local AI]: Could not sync state to backend — ${err?.message ?? err}`);
+    }
   }
 }
 
@@ -448,6 +573,11 @@ async function triggerTabOrganize() {
   const btn = document.getElementById('ai-organize-tabs-btn');
   const defaultLabel = '🧩 Organize';
 
+  if (!isAiOnline()) {
+    app.log('[Tabs Engine]: Organize skipped — Local AI is turned off.');
+    return;
+  }
+
   if (!window.pywebview?.api?.classify_and_organize_tabs) {
     app.log('[Tabs Engine]: AI organize unavailable — pywebview bridge not ready.');
     return;
@@ -502,6 +632,79 @@ function switchSidebarView(view) {
   app.state.sidebarMode = view;
   app.log(`Sidebar: switched to ${view === 'assistant' ? 'AI Assistant' : 'System Logs'} view`);
 }
+
+/* ── Ollama troubleshooting (System Logs) ───────────────────── */
+
+async function runOllamaHealthCheck() {
+  const btn = document.getElementById('ollama-health-btn');
+  if (!window.pywebview?.api?.check_ollama_health) {
+    app.log('[Ollama] Health check unavailable — Python bridge not ready.');
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  app.log('[Ollama] Running health check…');
+
+  try {
+    const result = await window.pywebview.api.check_ollama_health();
+    const prefix = result?.healthy ? '✓' : '✗';
+    app.log(`[Ollama] ${prefix} ${result?.message ?? 'No response from health check.'}`);
+    if (result?.healthy && result?.models?.length) {
+      const preview = result.models.slice(0, 6).join(', ');
+      app.log(`[Ollama] Models: ${preview}${result.models.length > 6 ? '…' : ''}`);
+    }
+  } catch (err) {
+    app.log(`[Ollama] ✗ Health check error — ${err?.message ?? err}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function runOllamaRestart() {
+  const btn = document.getElementById('ollama-restart-btn');
+
+  if (app.state.isAgentRunning) {
+    app.log('[Ollama] Restart blocked — wait for the research agent to finish.');
+    return;
+  }
+
+  if (!window.pywebview?.api?.restart_ollama) {
+    app.log('[Ollama] Restart unavailable — Python bridge not ready.');
+    return;
+  }
+
+  const confirmed = window.confirm(
+    'Restart the local Ollama service?\n\n' +
+    'Other applications using Ollama may be interrupted. ' +
+    'Progress will appear in System Logs.'
+  );
+  if (!confirmed) {
+    app.log('[Ollama] Restart cancelled.');
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  app.log('[Ollama] Restart initiated…');
+
+  try {
+    const result = await window.pywebview.api.restart_ollama();
+    if (result?.status === 'started') {
+      app.log(`[Ollama] ${result.message ?? 'Restart in progress.'}`);
+    } else {
+      app.log(`[Ollama] ✗ ${result?.message ?? 'Could not start restart.'}`);
+      if (btn) btn.disabled = false;
+    }
+  } catch (err) {
+    app.log(`[Ollama] ✗ Restart error — ${err?.message ?? err}`);
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** Called from Python when the background Ollama restart worker exits. */
+window.onOllamaRestartDone = function onOllamaRestartDone() {
+  const btn = document.getElementById('ollama-restart-btn');
+  if (btn) btn.disabled = false;
+};
 
 /* ── Feature Mode Dropdown ──────────────────────────────────── */
 
@@ -594,6 +797,15 @@ async function submitSidebarQuery() {
 
   app.appendMessage('user', text);
   input.value = '';
+
+  if (!isAiOnline()) {
+    app.appendMessage(
+      'assistant',
+      'Local AI is turned off. Click “Local AI Offline” in the toolbar to turn it back on.'
+    );
+    app.log('[Sidebar]: Message blocked — Local AI is off.');
+    return;
+  }
 
   // ── Objective Research Agent mode ─────────────────────────────
   if (app.state.featureMode === 'research') {
@@ -1015,17 +1227,30 @@ async function handleNavigation() {
   // Branch A — AI intercept: leading ? with additional query text
   if (input.startsWith('?')) {
     const parsedQuery = input.slice(1).trim();
+    const fallbackUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(parsedQuery)}`;
+
+    if (!isAiOnline()) {
+      app.log(`[AI Intercept]: Local AI off — searching without translation for "${parsedQuery}".`);
+      await loadUrl(fallbackUrl);
+      return;
+    }
+
     app.log(`[AI Intercept]: Vague query "${parsedQuery}" registered.`);
     app.log('[Nabu Engine]: Consulting local LLM for context translation...');
 
     try {
       const result = await window.pywebview.api.translate_vague_query(parsedQuery);
-      app.log(`[AI Translator]: Optimized keywords received -> "${result.keywords}"`);
-      const optimizedUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(result.keywords)}`;
+      const keywords = result?.keywords ?? parsedQuery;
+      if (result?.status === 'error' && result?.message?.includes('turned off')) {
+        app.log('[AI Translator]: Local AI off — using raw query.');
+        await loadUrl(fallbackUrl);
+        return;
+      }
+      app.log(`[AI Translator]: Optimized keywords received -> "${keywords}"`);
+      const optimizedUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(keywords)}`;
       await loadUrl(optimizedUrl);
     } catch (err) {
       app.log(`[AI Translator]: Bridge error — ${err?.message ?? err}. Falling back to raw query.`);
-      const fallbackUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(parsedQuery)}`;
       await loadUrl(fallbackUrl);
     }
     return;
@@ -1153,6 +1378,10 @@ async function testBridge() {
 }
 
 async function askPythonForKeywords() {
+  if (!isAiOnline()) {
+    app.log('Keyword translation skipped — Local AI is turned off.');
+    return;
+  }
   const queryInput = document.getElementById('address-bar').value;
   app.log('AI translating query to search keywords…');
   try {
@@ -1269,6 +1498,8 @@ window.addEventListener('DOMContentLoaded', () => {
   app.log('UI workspace ready.');
   app.log('Mode: General Chat.');
 
+  applyAiStatusUI(app.state.isAiOnline);
+
   // Install DOM mutation guard — must run before any dynamic content loads.
   _installShellGuard();
 
@@ -1291,6 +1522,11 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // AI status toggle (inline onclick removed from HTML).
   document.getElementById('ai-status-btn')?.addEventListener('click', toggleAiStatus);
+
+  const modelSelect = document.getElementById('ai-model-select');
+  if (modelSelect) {
+    modelSelect.addEventListener('change', onModelSelectChange);
+  }
 
   document.getElementById('ai-organize-tabs-btn')?.addEventListener('click', triggerTabOrganize);
 
@@ -1316,6 +1552,9 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('forward-btn')?.addEventListener('click', navForward);
   document.getElementById('refresh-btn')?.addEventListener('click', navRefresh);
 
+  document.getElementById('ollama-health-btn')?.addEventListener('click', runOllamaHealthCheck);
+  document.getElementById('ollama-restart-btn')?.addEventListener('click', runOllamaRestart);
+
   // Receive navigation and search messages from the sandboxed web-view iframe.
   // We do NOT use a strict e.source identity check here: in pywebview's GTK
   // WebKit2GTK backend, e.source for a sandboxed null-origin iframe is often
@@ -1332,9 +1571,26 @@ window.addEventListener('DOMContentLoaded', () => {
   // Session restore requires the pywebview bridge. Run immediately if it is
   // already available (common case), otherwise wait for the 'pywebviewready'
   // event that pywebview fires once the JS↔Python channel is open.
-  if (window.pywebview?.api) {
+  const onBridgeReady = () => {
+    if (window.pywebview?.api?.get_ai_enabled) {
+      window.pywebview.api.get_ai_enabled()
+        .then((res) => {
+          if (res && typeof res.enabled === 'boolean') {
+            app.state.isAiOnline = res.enabled;
+            applyAiStatusUI(res.enabled);
+          }
+        })
+        .catch(() => { /* keep default on */ });
+    }
+    initModelSelect().catch((err) => {
+      console.warn('[Model Select] init failed:', err);
+    });
     restoreOrInit();
+  };
+
+  if (window.pywebview?.api) {
+    onBridgeReady();
   } else {
-    window.addEventListener('pywebviewready', restoreOrInit, { once: true });
+    window.addEventListener('pywebviewready', onBridgeReady, { once: true });
   }
 });

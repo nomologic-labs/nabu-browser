@@ -371,11 +371,125 @@ function homePortalSearch(query) {
   loadUrl(searchUrl);
 }
 
-/* ── Tab Grouping ───────────────────────────────────────────── */
+/* ── AI Tab Organizing ──────────────────────────────────────── */
 
-function triggerTabGrouping() {
-  console.log('Tab Grouping triggered');
-  app.log('Tab grouping triggered — awaiting AI response…');
+const TAB_CLUSTER_CLASS_PREFIX = 'tab-cluster-';
+const TAB_CLUSTER_PALETTE_SIZE = 6;
+
+/**
+ * Reorders tab pills in the strip and applies cluster styling.
+ * Called from Python via evaluate_js and from the organize button handler.
+ * @param {Array<{category_name: string, associated_tab_ids: string[]}>} groupsPayload
+ */
+window.applyTabGroups = function applyTabGroups(groupsPayload) {
+  if (!Array.isArray(groupsPayload) || groupsPayload.length === 0) return;
+
+  const container = document.getElementById('tabs-header-container');
+  const addBtn    = document.getElementById('add-tab-btn');
+  if (!container || !addBtn) return;
+
+  const knownIds = new Set(tabs.tabsList.map(t => String(t.id)));
+  const ordered  = [];
+  const placed   = new Set();
+
+  groupsPayload.forEach((group, clusterIndex) => {
+    const name = (group?.category_name || group?.name || 'Group').trim() || 'Group';
+    const ids  = Array.isArray(group?.associated_tab_ids) ? group.associated_tab_ids : [];
+    ids.forEach((rawId) => {
+      const id = String(rawId);
+      if (!knownIds.has(id) || placed.has(id)) return;
+      placed.add(id);
+      ordered.push({ id, clusterIndex, name });
+    });
+  });
+
+  tabs.tabsList.forEach((t) => {
+    const id = String(t.id);
+    if (!placed.has(id)) ordered.push({ id, clusterIndex: -1, name: '' });
+  });
+
+  document.querySelectorAll('.tab-pill').forEach((pill) => {
+    pill.classList.remove('tab-clustered');
+    Array.from(pill.classList)
+      .filter(c => c.startsWith(TAB_CLUSTER_CLASS_PREFIX))
+      .forEach(c => pill.classList.remove(c));
+    pill.removeAttribute('data-cluster');
+    if (!pill.classList.contains('active')) pill.removeAttribute('title');
+  });
+
+  const rebuiltList = [];
+
+  ordered.forEach(({ id, clusterIndex, name }) => {
+    const pill = document.getElementById(`tab-pill-${id}`);
+    if (pill) {
+      container.insertBefore(pill, addBtn);
+      if (clusterIndex >= 0) {
+        const mod = clusterIndex % TAB_CLUSTER_PALETTE_SIZE;
+        pill.classList.add('tab-clustered', `${TAB_CLUSTER_CLASS_PREFIX}${mod}`);
+        pill.dataset.cluster = name;
+        const label = pill.querySelector('.tab-title')?.textContent || '';
+        pill.title = `${name}: ${label}`;
+      }
+    }
+    const tab = tabs.tabsList.find(t => String(t.id) === id);
+    if (tab) rebuiltList.push(tab);
+  });
+
+  if (rebuiltList.length === tabs.tabsList.length) {
+    tabs.tabsList = rebuiltList;
+  }
+
+  app.log(
+    `[Tabs Engine]: Organized ${ordered.length} tab(s) into ${groupsPayload.length} cluster(s).`
+  );
+};
+
+async function triggerTabOrganize() {
+  const btn = document.getElementById('ai-organize-tabs-btn');
+  const defaultLabel = '🧩 Organize';
+
+  if (!window.pywebview?.api?.classify_and_organize_tabs) {
+    app.log('[Tabs Engine]: AI organize unavailable — pywebview bridge not ready.');
+    return;
+  }
+  if (!tabs.tabsList.length) {
+    app.log('[Tabs Engine]: No open tabs to organize.');
+    return;
+  }
+
+  const tabsPayload = tabs.tabsList.map(t => ({
+    id:    String(t.id),
+    url:   t.url ?? '',
+    title: t.title ?? 'New Tab',
+  }));
+
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('is-organizing');
+    btn.textContent = 'Organizing...';
+  }
+  app.log('[Tabs Engine]: Sending tab metadata to local AI for clustering…');
+
+  try {
+    const result = await window.pywebview.api.classify_and_organize_tabs(
+      JSON.stringify(tabsPayload)
+    );
+    if (result?.status === 'success' && Array.isArray(result.groups) && result.groups.length) {
+      window.applyTabGroups(result.groups);
+    } else {
+      const msg = result?.message || 'Tab organization did not return clusters.';
+      app.log(`[Tabs Engine]: Organize failed — ${msg}`);
+    }
+  } catch (err) {
+    console.error('[Tabs Engine] organize error:', err);
+    app.log(`[Tabs Engine]: Organize error — ${err?.message || err}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove('is-organizing');
+      btn.textContent = defaultLabel;
+    }
+  }
 }
 
 /* ── Sidebar View Toggle ────────────────────────────────────── */
@@ -394,14 +508,84 @@ function switchSidebarView(view) {
 function onFeatureChange() {
   const select = document.getElementById('feature-select');
   const input  = document.getElementById('ai-chat-input');
+  const researchOpts = document.getElementById('research-options');
   if (!select || !input) return;
   const mode = select.value;
   app.state.featureMode = mode;
   input.placeholder = MODE_PLACEHOLDERS[mode] ?? 'Ask Nabu anything…';
+  researchOpts?.style && (researchOpts.style.display = mode === 'research' ? 'flex' : 'none');
   app.log(`Feature mode → ${mode === 'chat' ? '💬 General Chat' : '🔍 Research Agent'}`);
 }
 
 /* ── Sidebar Query Submission ───────────────────────────────── */
+
+/** Active research-agent status bubble (updated in-place by Python). */
+let _agentStatusBubble = null;
+
+function _appendAgentStatusBubble(initialText) {
+  const space = document.getElementById('chat-history-output');
+  if (!space) return null;
+  const thinkingMsg = document.createElement('div');
+  thinkingMsg.className = 'chat-message assistant agent-status';
+  const thinkingBubble = document.createElement('div');
+  thinkingBubble.className = 'bubble';
+  thinkingBubble.style.cssText = 'opacity:.55;font-style:italic';
+  thinkingBubble.textContent = initialText;
+  thinkingMsg.appendChild(thinkingBubble);
+  space.appendChild(thinkingMsg);
+  space.scrollTop = space.scrollHeight;
+  _agentStatusBubble = thinkingBubble;
+  return thinkingBubble;
+}
+
+/**
+ * Opens a new browser tab and loads a URL through the proxy pipeline.
+ * Called remotely by the Python research agent via evaluate_js.
+ * @param {string} url
+ * @returns {number|null}  New tab id
+ */
+window.agentOpenTab = function agentOpenTab(url) {
+  const target = (url ?? '').trim();
+  if (!target) return null;
+  let title = 'Research';
+  try { title = new URL(target).hostname; } catch (_) {}
+  const id = tabs.create(title, target);
+  app.log(`[Research Agent]: Opened tab ${id} → ${target}`);
+  return id;
+};
+
+/** Push live status text into the sidebar while the agent runs. */
+window.updateAgentStatus = function updateAgentStatus(message) {
+  if (!_agentStatusBubble) {
+    _appendAgentStatusBubble(message);
+    return;
+  }
+  _agentStatusBubble.style.cssText = 'opacity:.55;font-style:italic';
+  _agentStatusBubble.textContent = message;
+  const space = document.getElementById('chat-history-output');
+  if (space) space.scrollTop = space.scrollHeight;
+  app.log(`[Research Agent]: ${message}`);
+};
+
+/** Replace the status bubble with the final synthesized report. */
+window.displayAgentResult = function displayAgentResult(text) {
+  if (!_agentStatusBubble) {
+    app.appendMessage('assistant', text);
+  } else {
+    _agentStatusBubble.style.cssText = '';
+    _agentStatusBubble.textContent = text;
+  }
+  const space = document.getElementById('chat-history-output');
+  if (space) space.scrollTop = space.scrollHeight;
+  app.log('[Research Agent]: Final report delivered.');
+};
+
+/** Reset agent session flags after the background loop finishes. */
+window.finishAgentSession = function finishAgentSession() {
+  app.state.isAgentRunning = false;
+  _agentStatusBubble = null;
+  app.log('[Research Agent]: Session complete.');
+};
 
 async function submitSidebarQuery() {
   const input = document.getElementById('ai-chat-input');
@@ -411,7 +595,52 @@ async function submitSidebarQuery() {
   app.appendMessage('user', text);
   input.value = '';
 
-  // Insert a "Thinking…" indicator that will be swapped in-place on resolution
+  // ── Objective Research Agent mode ─────────────────────────────
+  if (app.state.featureMode === 'research') {
+    if (app.state.isAgentRunning) {
+      app.appendMessage('assistant', 'A research agent session is already running.');
+      return;
+    }
+    if (!window.pywebview?.api?.start_research_agent) {
+      app.appendMessage('assistant', 'Research agent backend is not available.');
+      return;
+    }
+
+    const maxPagesEl = document.getElementById('research-max-pages');
+    const maxPages   = Math.max(1, Math.min(10, parseInt(maxPagesEl?.value, 10) || 4));
+
+    app.state.isAgentRunning = true;
+    _appendAgentStatusBubble('Agent starting…');
+    app.log(`[Research Agent]: Goal submitted — "${text}" (max ${maxPages} pages)`);
+
+    try {
+      const result = await window.pywebview.api.start_research_agent(text, maxPages);
+      if (result?.status !== 'started') {
+        window.finishAgentSession();
+        const errMsg = result?.message ?? 'Could not start the research agent.';
+        if (_agentStatusBubble) {
+          _agentStatusBubble.style.cssText = 'color:#c0392b';
+          _agentStatusBubble.textContent = errMsg;
+        } else {
+          app.appendMessage('assistant', errMsg);
+        }
+        app.log(`[Research Agent]: Start failed — ${errMsg}`);
+      }
+    } catch (err) {
+      window.finishAgentSession();
+      const errMsg = err?.message ?? String(err);
+      if (_agentStatusBubble) {
+        _agentStatusBubble.style.cssText = 'color:#c0392b';
+        _agentStatusBubble.textContent = `Error: ${errMsg}`;
+      } else {
+        app.appendMessage('assistant', `Error: ${errMsg}`);
+      }
+      app.log(`[Research Agent]: Bridge error — ${errMsg}`);
+    }
+    return;
+  }
+
+  // ── General Chat mode ─────────────────────────────────────────
   const space = document.getElementById('chat-history-output');
   const thinkingMsg = document.createElement('div');
   thinkingMsg.className = 'chat-message assistant';
@@ -670,7 +899,7 @@ async function loadUrl(url) {
   showRouterSuccessBanner(url);
 
   try {
-    const result = await window.pywebview.api.load_and_scrape_url(url);
+    const result = await window.pywebview.api.load_and_scrape_url(url, tabs.activeId);
 
     // Reset the frame's security context before injecting new content.
     // Removing 'src' alone is not enough — the browser keeps the old cross-origin
@@ -704,7 +933,7 @@ async function loadUrl(url) {
     if (tabs.activeId != null) {
       tabs.setUrl(tabs.activeId, finalUrl);
       tabs.setTitle(tabs.activeId, finalTitle);
-      logNavigationToPython(tabs.activeId, finalUrl, finalTitle);
+      logNavigationToPython(tabs.activeId, finalUrl, finalTitle, result.text ?? '');
       // Persist the updated URL and title so the next restore reflects
       // the page the user actually navigated to.
       syncTabState(tabs.activeId, finalUrl, finalTitle, true);
@@ -855,10 +1084,10 @@ function navRefresh() {
  * @param {string} url     Fully-qualified URL that was loaded.
  * @param {string} title   Display title stored for the tab (hostname or fallback).
  */
-async function logNavigationToPython(tabId, url, title) {
+async function logNavigationToPython(tabId, url, title, pageContent = '') {
   if (!window.pywebview?.api?.log_navigation) return;
   try {
-    await window.pywebview.api.log_navigation(tabId, url, title, "");
+    await window.pywebview.api.log_navigation(tabId, url, title, pageContent);
     app.log(`[Python Bridge]: Navigation logged → Tab ${tabId}  "${url}"`);
   } catch (_) {
     // Bridge unavailable or call rejected — fail silently.
@@ -1063,8 +1292,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // AI status toggle (inline onclick removed from HTML).
   document.getElementById('ai-status-btn')?.addEventListener('click', toggleAiStatus);
 
-  // Tab grouping button (inline onclick removed from HTML).
-  document.getElementById('tab-group-btn')?.addEventListener('click', triggerTabGrouping);
+  document.getElementById('ai-organize-tabs-btn')?.addEventListener('click', triggerTabOrganize);
 
   // Sidebar chat — event listeners wired in JS (no inline handlers in HTML).
   const sidebarInput   = document.getElementById('ai-chat-input');

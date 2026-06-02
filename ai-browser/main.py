@@ -1,7 +1,9 @@
+import json
 import os
 import re
 import sys
 import sqlite3
+import threading
 import time
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -24,6 +26,10 @@ class NabuAPI:
 
         # 3. Initialize the database immediately on boot
         self._init_db()
+
+        # Set after webview.create_window(); used by the research agent for evaluate_js.
+        self.window = None
+
         print(f"[Nabu Backend] Connected to local memory bank at: {self.db_path}")
 
     def test_connection(self, message):
@@ -236,6 +242,112 @@ class NabuAPI:
                 "status": "error",
                 "response": f"Could not connect to local AI engine: {str(e)}",
             }
+
+    @staticmethod
+    def _extract_json_array_from_llm(text):
+        """Strip markdown fences and parse the first JSON array from an LLM reply."""
+        cleaned = (text or "").strip()
+        fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, re.I)
+        if fence:
+            cleaned = fence.group(1).strip()
+        start = cleaned.find("[")
+        end = cleaned.rfind("]")
+        if start != -1 and end > start:
+            cleaned = cleaned[start : end + 1]
+        return json.loads(cleaned)
+
+    def _normalize_tab_groups(self, groups, tab_ids):
+        """Ensure groups are well-formed and every tab id appears exactly once."""
+        if not isinstance(groups, list):
+            raise ValueError("AI response was not a JSON array")
+
+        normalized = []
+        assigned = set()
+        tab_id_set = {str(t) for t in tab_ids}
+
+        for item in groups:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("category_name") or item.get("name") or "Group").strip() or "Group"
+            raw_ids = item.get("associated_tab_ids") or item.get("tab_ids") or []
+            if not isinstance(raw_ids, list):
+                continue
+            ids = []
+            for raw in raw_ids:
+                tid = str(raw).strip()
+                if tid in tab_id_set and tid not in assigned:
+                    assigned.add(tid)
+                    ids.append(tid)
+            if ids:
+                normalized.append({"category_name": name, "associated_tab_ids": ids})
+
+        missing = [tid for tid in tab_ids if str(tid) not in assigned]
+        if missing:
+            normalized.append(
+                {"category_name": "Other", "associated_tab_ids": [str(t) for t in missing]}
+            )
+        return normalized
+
+    def classify_and_organize_tabs(self, tabs_json):
+        """
+        Send open-tab metadata to Ollama for topical clustering, then apply
+        the resulting groups in the tab strip via evaluate_js.
+        """
+        try:
+            tabs = json.loads(tabs_json or "[]")
+            if not isinstance(tabs, list) or not tabs:
+                return {"status": "error", "message": "No tabs to organize", "groups": []}
+
+            tab_ids = []
+            tab_lines = []
+            for tab in tabs:
+                if not isinstance(tab, dict):
+                    continue
+                tid = str(tab.get("id", "")).strip()
+                if not tid:
+                    continue
+                tab_ids.append(tid)
+                title = str(tab.get("title") or "Untitled").strip()
+                url = str(tab.get("url") or "").strip()
+                tab_lines.append(f'- id: "{tid}", title: "{title}", url: "{url}"')
+
+            if not tab_ids:
+                return {"status": "error", "message": "No valid tab ids", "groups": []}
+
+            system_prompt = (
+                "You are a browser tab organization engine. Analyze the following list of "
+                "open browser tab titles and URLs. Group them logically into clusters based on "
+                "shared topics, industries, or tasks (e.g., \"Research\", \"Shopping\", "
+                "\"Development\", \"Entertainment\").\n\n"
+                "Return ONLY a valid JSON array of objects representing the categories, where "
+                'each category object has a "category_name" string and an "associated_tab_ids" '
+                "array of strings matching the IDs provided. Do not return any introductory "
+                "prose or markdown code blocks outside of the JSON payload.\n\n"
+                "Open tabs:\n" + "\n".join(tab_lines)
+            )
+
+            response = requests.post(
+                self.ollama_url,
+                json={"model": "llama3.2:3b", "prompt": system_prompt, "stream": False},
+                timeout=90,
+            )
+            ai_output = response.json().get("response", "").strip()
+            if not ai_output:
+                raise ValueError("Ollama returned an empty response")
+
+            parsed = self._extract_json_array_from_llm(ai_output)
+            groups = self._normalize_tab_groups(parsed, tab_ids)
+
+            print(f"[Tab Organizer] Grouped {len(tab_ids)} tab(s) into {len(groups)} cluster(s)")
+            return {"status": "success", "groups": groups}
+
+        except json.JSONDecodeError as exc:
+            print(f"[Tab Organizer] JSON parse error: {exc}")
+            return {"status": "error", "message": f"Invalid AI JSON: {exc}", "groups": []}
+        except Exception as exc:
+            print(f"[Tab Organizer] Error: {exc}")
+            return {"status": "error", "message": str(exc), "groups": []}
+
     @staticmethod
     def _unwrap_duckduckgo_redirect(url):
         """Decode DuckDuckGo /l/?uddg=… tracking URLs to the real destination."""
@@ -304,7 +416,7 @@ class NabuAPI:
             flags=re.I,
         )
 
-    def load_and_scrape_url(self, url):
+    def load_and_scrape_url(self, url, tab_id=None):
         """
         Feature 5.1: Local Python Proxy. Downloads a webpage on the backend,
         extracts its inner readable text, commits it to SQLite, and returns 
@@ -386,11 +498,15 @@ class NabuAPI:
             modified_html = self._strip_meta_refresh(modified_html)
 
             # 4. Commit the scraped page to the browsing history store.
+            store_tab_id = str(tab_id) if tab_id is not None else "proxy"
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO browsing_history (tab_id, url, title, timestamp) VALUES (?, ?, ?, ?)",
-                ("proxy", url, page_title, time.time()),
+                """
+                INSERT INTO browsing_history (tab_id, url, title, page_content, timestamp)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (store_tab_id, final_url, page_title, clean_text, time.time()),
             )
             conn.commit()
             conn.close()
@@ -476,6 +592,300 @@ class NabuAPI:
             print(f"[Session Error] Recovery failed: {str(e)}")
             return {"status": "error", "tabs": []}
 
+    # ── Objective Research Agent ─────────────────────────────────────
+
+    def start_research_agent(self, goal, max_pages=4):
+        """Spawn the autonomous research loop on a background worker thread."""
+        goal = str(goal).strip()
+        if not goal:
+            return {"status": "error", "message": "Research goal was empty."}
+        if self.window is None:
+            return {"status": "error", "message": "Browser window is not ready."}
+
+        max_pages = max(1, min(int(max_pages), 10))
+        threading.Thread(
+            target=self._run_agent_loop,
+            args=(goal, max_pages),
+            daemon=True,
+        ).start()
+        print(f"[Research Agent] Started — goal='{goal}', max_pages={max_pages}")
+        return {"status": "started", "max_pages": max_pages}
+
+    def _eval_js(self, js_code):
+        """Safely invoke JavaScript on the UI thread's webview."""
+        if self.window is None:
+            return None
+        try:
+            return self.window.evaluate_js(js_code)
+        except Exception as exc:
+            print(f"[Research Agent] evaluate_js failed: {exc}")
+            return None
+
+    def _agent_ui_status(self, message):
+        payload = json.dumps(str(message))
+        self._eval_js(f"window.updateAgentStatus && window.updateAgentStatus({payload})")
+
+    def _agent_ui_result(self, text):
+        payload = json.dumps(str(text))
+        self._eval_js(f"window.displayAgentResult && window.displayAgentResult({payload})")
+
+    def _agent_ui_finish(self):
+        self._eval_js("window.finishAgentSession && window.finishAgentSession()")
+
+    def _generate_research_search_query(self, goal):
+        """Ask Ollama for a single clean search-engine query string."""
+        prompt = (
+            "You are a search query optimizer. Given a high-level research goal, "
+            "output ONLY one concise search-engine query string (no quotes, no explanation, "
+            "no punctuation beyond what a search engine expects). "
+            f"Research goal: {goal}"
+        )
+        try:
+            response = requests.post(
+                self.ollama_url,
+                json={"model": "llama3.2:3b", "prompt": prompt, "stream": False},
+                timeout=30,
+            )
+            query = response.json().get("response", "").strip()
+            query = re.sub(r'^["\']+|["\']+$', "", query)
+            query = query.split("\n")[0].strip()
+            return query or goal
+        except Exception as exc:
+            print(f"[Research Agent] Search query generation failed: {exc}")
+            return goal
+
+    def _fetch_search_result_urls(self, query, limit=10):
+        """Run a DuckDuckGo HTML search and extract destination URLs."""
+        search_url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        try:
+            response = requests.get(search_url, headers=headers, timeout=15, verify=False)
+            html = response.text
+        except Exception as exc:
+            print(f"[Research Agent] Search fetch failed: {exc}")
+            return []
+
+        urls = []
+        seen = set()
+        patterns = [
+            r'class="result__a"[^>]+href="([^"]+)"',
+            r'class="result-link"[^>]+href="([^"]+)"',
+            r'href="(//duckduckgo\.com/l/\?uddg=[^"]+)"',
+            r'href="(https?://duckduckgo\.com/l/\?uddg=[^"]+)"',
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, html, re.I):
+                href = match.group(1)
+                if href.startswith("//"):
+                    href = "https:" + href
+                target = self._unwrap_duckduckgo_redirect(href)
+                host = urlparse(target).netloc.lower()
+                if not target.startswith("http"):
+                    continue
+                if "duckduckgo.com" in host:
+                    continue
+                if target in seen:
+                    continue
+                seen.add(target)
+                urls.append(target)
+                if len(urls) >= limit:
+                    return urls
+        return urls
+
+    @staticmethod
+    def _url_host_key(url):
+        """Normalize a URL to a comparable host key (strip www.)."""
+        try:
+            host = urlparse(url).netloc.lower()
+            return host[4:] if host.startswith("www.") else host
+        except Exception:
+            return str(url).lower()
+
+    def _wait_for_scraped_content(self, since_ts, tab_id=None, expected_url=None, timeout=12):
+        """Poll SQLite until the proxy commits fresh page_content for this visit."""
+        deadline = time.time() + timeout
+        tab_key = None
+        if tab_id is not None:
+            try:
+                tab_key = str(int(float(tab_id)))
+            except (TypeError, ValueError):
+                tab_key = str(tab_id)
+        expected_host = self._url_host_key(expected_url) if expected_url else None
+
+        while time.time() < deadline:
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                row = None
+
+                if tab_key is not None:
+                    cursor.execute(
+                        """
+                        SELECT url, title, page_content FROM browsing_history
+                        WHERE tab_id = ?
+                          AND timestamp >= ?
+                          AND page_content IS NOT NULL
+                          AND page_content != ''
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                        """,
+                        (tab_key, since_ts),
+                    )
+                    row = cursor.fetchone()
+
+                if (not row or not row[2]) and expected_host:
+                    cursor.execute(
+                        """
+                        SELECT url, title, page_content FROM browsing_history
+                        WHERE timestamp >= ?
+                          AND page_content IS NOT NULL
+                          AND page_content != ''
+                          AND tab_id != 'ai_engine'
+                          AND lower(url) LIKE ?
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                        """,
+                        (since_ts, f"%{expected_host}%"),
+                    )
+                    row = cursor.fetchone()
+
+                if not row or not row[2]:
+                    cursor.execute(
+                        """
+                        SELECT url, title, page_content FROM browsing_history
+                        WHERE timestamp >= ?
+                          AND page_content IS NOT NULL
+                          AND page_content != ''
+                          AND tab_id != 'ai_engine'
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                        """,
+                        (since_ts,),
+                    )
+                    row = cursor.fetchone()
+
+                conn.close()
+                if row and row[2]:
+                    return {"url": row[0], "title": row[1], "text": row[2]}
+            except Exception as exc:
+                print(f"[Research Agent] DB poll error: {exc}")
+            time.sleep(0.5)
+        return None
+
+    def _open_agent_tab(self, url):
+        """Tell the UI to spawn a visible tab and load the URL through the proxy."""
+        url_js = json.dumps(url)
+        return self._eval_js(f"window.agentOpenTab && window.agentOpenTab({url_js})")
+
+    def _run_agent_loop(self, goal, max_pages):
+        """Autonomous multi-turn browse → scrape → synthesize loop."""
+        collected = []
+        try:
+            self._agent_ui_status("Agent thinking… generating search query")
+            search_query = self._generate_research_search_query(goal)
+            print(f"[Research Agent] Search query: {search_query}")
+
+            self._agent_ui_status(f"Agent searching: \"{search_query}\"")
+            candidate_urls = self._fetch_search_result_urls(search_query, limit=max_pages + 4)
+            if not candidate_urls:
+                self._agent_ui_result(
+                    "Could not find any search results. Check your network connection "
+                    "or try rephrasing your research goal."
+                )
+                return
+
+            visit_urls = candidate_urls[:max_pages]
+            for idx, url in enumerate(visit_urls, start=1):
+                self._agent_ui_status(f"Agent browsing page {idx}/{max_pages}…")
+                visit_started = time.time()
+                tab_id = self._open_agent_tab(url)
+                time.sleep(3.5)
+
+                page = self._wait_for_scraped_content(
+                    since_ts=visit_started - 1.0,
+                    tab_id=tab_id,
+                    expected_url=url,
+                )
+                if not page:
+                    print(f"[Research Agent] No scraped content for {url}")
+                    continue
+
+                snippet = page["text"][:4000]
+                collected.append(
+                    {
+                        "url": page["url"],
+                        "title": page["title"],
+                        "text": snippet,
+                    }
+                )
+                print(
+                    f"[Research Agent] Collected {len(snippet)} chars from "
+                    f"{page['url']}"
+                )
+
+            if not collected:
+                self._agent_ui_result(
+                    "The agent visited pages but could not scrape readable text. "
+                    "Try again or reduce the number of pages."
+                )
+                return
+
+            self._agent_ui_status("Agent synthesizing final research report…")
+            sources_block = ""
+            for i, src in enumerate(collected, start=1):
+                sources_block += (
+                    f"\n--- SOURCE {i}: {src['title']} ({src['url']}) ---\n"
+                    f"{src['text']}\n"
+                )
+
+            synthesis_prompt = (
+                "You are an elite research assistant. Based on the text scraped from "
+                "these multiple web sources, write a definitive, comprehensive final "
+                f"essay/summary addressing the core goal: '{goal}'.\n"
+                "Structure the response clearly. At the end, include a 'Sources Visited' "
+                "section listing every URL with a one-line description of what each "
+                "source contributed.\n\n"
+                f"SCRAPED WEB CONTENT:{sources_block}\n\n"
+                "Final Research Report:"
+            )
+
+            try:
+                response = requests.post(
+                    self.ollama_url,
+                    json={
+                        "model": "llama3.2:3b",
+                        "prompt": synthesis_prompt,
+                        "stream": False,
+                    },
+                    timeout=120,
+                )
+                final_text = response.json().get("response", "").strip()
+            except Exception as exc:
+                print(f"[Research Agent] Synthesis failed: {exc}")
+                final_text = (
+                    f"Synthesis failed ({exc}). Raw notes from {len(collected)} page(s):\n\n"
+                    + sources_block
+                )
+
+            if not final_text:
+                final_text = (
+                    "The local AI returned an empty synthesis. "
+                    f"Collected text from {len(collected)} source(s) is stored in Nabu memory."
+                )
+
+            self._agent_ui_result(final_text)
+
+        except Exception as exc:
+            print(f"[Research Agent] Loop error: {exc}")
+            self._agent_ui_result(f"Research agent encountered an error: {exc}")
+        finally:
+            self._agent_ui_finish()
+
 
 # --- Execution Pipeline ---
 
@@ -492,6 +902,7 @@ window = webview.create_window(
     width=1100,
     height=750,
 )
+api.window = window
 
 # Start the application loop (This locks execution while the window runs)
 webview.start(debug=True)

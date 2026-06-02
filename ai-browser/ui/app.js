@@ -66,9 +66,18 @@ const NEW_TAB_HTML = `<!DOCTYPE html>
 
 /* ── Placeholder text per mode ──────────────────────────────── */
 const MODE_PLACEHOLDERS = {
-  chat:     'Ask Nabu anything…',
-  research: 'Enter research objective target…',
+  chat:            'Ask Nabu anything…',
+  research:        'Enter research objective target…',
+  'website-writer': 'Type instructions to replace \'?aiwrite\' on the active page…',
 };
+
+const FEATURE_MODE_LABELS = {
+  chat:            '💬 General Chat',
+  research:        '🔍 Research Agent',
+  'website-writer': '📝 In-Website Writer',
+};
+
+const AIWRITE_TOKEN = '?aiwrite';
 
 /* ════════════════════════════════════════════════════════════════
    TAB MANAGER
@@ -78,7 +87,7 @@ const MODE_PLACEHOLDERS = {
    ════════════════════════════════════════════════════════════════ */
 const tabs = {
   counter:     0,
-  tabsList:    [],    // [{ id: number, title: string, url: string }]
+  tabsList:    [],    // [{ id, title, url, history: [{url,title}], historyIndex }]
   activeTabId: null,
 
   /** Convenience alias so internal code can use this.list or this.tabsList. */
@@ -96,10 +105,11 @@ const tabs = {
   create(title = 'New Tab', url = '') {
     const id      = ++this.counter;
     const prevId  = this.activeTabId;
-    this.tabsList.push({ id, title, url });
+    this.tabsList.push({ id, title, url, history: [], historyIndex: -1 });
     this._buildPill(id, title);
     this._activate(id, /* silent */ true);
     this._loadContent(url);
+    this.updateNavButtons();
     app.log(`[Tabs Engine]: Spawned Tab ${id} — "${title}"`);
     // Persist: mark previous tab inactive, new tab active.
     if (prevId != null) {
@@ -121,7 +131,12 @@ const tabs = {
     const tab    = this.tabsList.find(t => t.id === id);
     if (!tab) return;
     this._activate(id, /* silent */ true);
-    this._loadContent(tab.url);
+    const entry = tab.history[tab.historyIndex];
+    if (entry) {
+      loadHistoryEntry(entry);
+    } else {
+      this._loadContent(tab.url);
+    }
     app.log(`[Tabs Engine]: Focus shifted to Tab ${id} — "${tab.title}"`);
     // Persist: mark previous tab inactive, new tab active.
     if (prevId != null) {
@@ -129,6 +144,7 @@ const tabs = {
       if (prev) syncTabState(prevId, prev.url, prev.title, false);
     }
     syncTabState(id, tab.url, tab.title, true);
+    this.updateNavButtons();
   },
 
   /**
@@ -172,6 +188,70 @@ const tabs = {
     if (el) el.textContent = title;
   },
 
+  /**
+   * Records a navigation in the active tab's history stack.
+   * @param {number}  id
+   * @param {string}  url
+   * @param {string}  title
+   * @param {{ replace?: boolean }} opts  replace=true overwrites the current entry (refresh)
+   */
+  recordNavigation(id, url, title, opts = {}) {
+    const tab = this.tabsList.find(t => t.id === id);
+    if (!tab) return;
+
+    const entry = { url, title };
+    const current = tab.history[tab.historyIndex];
+    if (!opts.replace && current && current.url === url) {
+      current.title = title;
+      this.updateNavButtons();
+      return;
+    }
+
+    if (opts.replace && tab.historyIndex >= 0) {
+      tab.history[tab.historyIndex] = entry;
+      this.updateNavButtons();
+      return;
+    }
+
+    if (tab.history.length === 0) {
+      tab.history.push({ url: 'about:blank', title: 'New Tab' });
+      tab.historyIndex = 0;
+    }
+
+    tab.history = tab.history.slice(0, tab.historyIndex + 1);
+    tab.history.push(entry);
+    tab.historyIndex = tab.history.length - 1;
+    this.updateNavButtons();
+  },
+
+  /** @returns {{ url: string, title: string } | null} */
+  historyBack() {
+    const tab = this.tabsList.find(t => t.id === this.activeTabId);
+    if (!tab || tab.historyIndex <= 0) return null;
+    tab.historyIndex -= 1;
+    this.updateNavButtons();
+    return tab.history[tab.historyIndex];
+  },
+
+  /** @returns {{ url: string, title: string } | null} */
+  historyForward() {
+    const tab = this.tabsList.find(t => t.id === this.activeTabId);
+    if (!tab || tab.historyIndex >= tab.history.length - 1) return null;
+    tab.historyIndex += 1;
+    this.updateNavButtons();
+    return tab.history[tab.historyIndex];
+  },
+
+  updateNavButtons() {
+    const tab = this.tabsList.find(t => t.id === this.activeTabId);
+    const canBack = Boolean(tab && tab.historyIndex > 0);
+    const canFwd  = Boolean(tab && tab.historyIndex < tab.history.length - 1);
+    const backBtn = document.getElementById('back-btn');
+    const fwdBtn  = document.getElementById('forward-btn');
+    if (backBtn) backBtn.disabled = !canBack;
+    if (fwdBtn)  fwdBtn.disabled  = !canFwd;
+  },
+
   /* ── Private helpers ──────────────────────────────────────── */
 
   /**
@@ -192,6 +272,7 @@ const tabs = {
     if (!silent) {
       app.log(`[Tabs Engine]: Focus shifted to Tab ${id} — "${tab?.title ?? ''}"`);
     }
+    this.updateNavButtons();
   },
 
   _loadContent(url) {
@@ -200,7 +281,7 @@ const tabs = {
     if (url && url !== 'about:blank') {
       // Route through the proxy — never assign frame.src directly, as that
       // triggers pywebview's GTK navigation handler and replaces the whole UI.
-      loadUrl(url);
+      loadUrl(url, { skipHistory: true });
     } else {
       try { frame.removeAttribute('src'); } catch (_) {}
       frame.srcdoc = NEW_TAB_HTML;
@@ -262,7 +343,13 @@ const tabs = {
     }
     // Keep counter ahead of the highest restored ID so new tabs don't collide.
     if (id >= this.counter) this.counter = id;
-    this.tabsList.push({ id, title, url });
+    const normalizedUrl = url || '';
+    const tab = { id, title, url: normalizedUrl, history: [], historyIndex: -1 };
+    if (normalizedUrl && normalizedUrl !== 'about:blank') {
+      tab.history = [{ url: normalizedUrl, title }];
+      tab.historyIndex = 0;
+    }
+    this.tabsList.push(tab);
     this._buildPill(id, title);
     if (makeActive) {
       this._activate(id, /* silent */ true);
@@ -712,12 +799,14 @@ function onFeatureChange() {
   const select = document.getElementById('feature-select');
   const input  = document.getElementById('ai-chat-input');
   const researchOpts = document.getElementById('research-options');
+  const writerOpts   = document.getElementById('writer-options');
   if (!select || !input) return;
   const mode = select.value;
   app.state.featureMode = mode;
   input.placeholder = MODE_PLACEHOLDERS[mode] ?? 'Ask Nabu anything…';
   researchOpts?.style && (researchOpts.style.display = mode === 'research' ? 'flex' : 'none');
-  app.log(`Feature mode → ${mode === 'chat' ? '💬 General Chat' : '🔍 Research Agent'}`);
+  writerOpts?.classList.toggle('visible', mode === 'website-writer');
+  app.log(`Feature mode → ${FEATURE_MODE_LABELS[mode] ?? mode}`);
 }
 
 /* ── Sidebar Query Submission ───────────────────────────────── */
@@ -790,6 +879,94 @@ window.finishAgentSession = function finishAgentSession() {
   app.log('[Research Agent]: Session complete.');
 };
 
+/**
+ * Replace the ?aiwrite token inside the active viewport iframe.
+ * Tries direct document access first; falls back to postMessage for
+ * sandboxed null-origin iframes (handled by the injected page script).
+ *
+ * @param {string} generatedText
+ * @returns {Promise<{ success: boolean, message?: string }>}
+ */
+window.injectTextAtPlaceholder = function injectTextAtPlaceholder(generatedText) {
+  const replacement = String(generatedText ?? '');
+  const frame = document.getElementById('web-view');
+  if (!frame) {
+    return Promise.resolve({ success: false, message: 'No active viewport.' });
+  }
+
+  const replaceInDoc = (doc) => {
+    if (!doc) return false;
+    let replaced = false;
+
+    doc.querySelectorAll('input, textarea').forEach((el) => {
+      if (typeof el.value === 'string' && el.value.includes(AIWRITE_TOKEN)) {
+        el.value = el.value.replace(AIWRITE_TOKEN, replacement);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        replaced = true;
+      }
+    });
+
+    doc.querySelectorAll('[contenteditable="true"], [contenteditable=""]').forEach((el) => {
+      const txt = el.innerText || el.textContent || '';
+      if (txt.includes(AIWRITE_TOKEN)) {
+        el.innerText = txt.replace(AIWRITE_TOKEN, replacement);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        replaced = true;
+      }
+    });
+
+    return replaced;
+  };
+
+  try {
+    const doc = frame.contentDocument || frame.contentWindow?.document;
+    if (doc && replaceInDoc(doc)) {
+      app.log('[In-Website Writer]: Text injected via direct DOM access.');
+      return Promise.resolve({ success: true });
+    }
+  } catch (_) {
+    /* sandboxed iframe — fall through to postMessage */
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      window.removeEventListener('message', onResult);
+      resolve({
+        success: false,
+        message: `Could not find ${AIWRITE_TOKEN} in any field on the active page.`,
+      });
+    }, 800);
+
+    function onResult(e) {
+      if (e.data?.type !== 'nabu-inject-result') return;
+      clearTimeout(timeout);
+      window.removeEventListener('message', onResult);
+      if (e.data.success) {
+        app.log('[In-Website Writer]: Text injected via iframe bridge.');
+        resolve({ success: true });
+      } else {
+        resolve({
+          success: false,
+          message: `Could not find ${AIWRITE_TOKEN} in any field on the active page.`,
+        });
+      }
+    }
+
+    window.addEventListener('message', onResult);
+    try {
+      frame.contentWindow?.postMessage(
+        { type: 'nabu-inject-placeholder', text: replacement },
+        '*'
+      );
+    } catch (err) {
+      clearTimeout(timeout);
+      window.removeEventListener('message', onResult);
+      resolve({ success: false, message: err?.message ?? String(err) });
+    }
+  });
+};
+
 async function submitSidebarQuery() {
   const input = document.getElementById('ai-chat-input');
   const text  = input?.value.trim();
@@ -848,6 +1025,56 @@ async function submitSidebarQuery() {
         app.appendMessage('assistant', `Error: ${errMsg}`);
       }
       app.log(`[Research Agent]: Bridge error — ${errMsg}`);
+    }
+    return;
+  }
+
+  // ── In-Website Writer mode ────────────────────────────────────
+  if (app.state.featureMode === 'website-writer') {
+    if (!window.pywebview?.api?.process_inline_writing) {
+      app.appendMessage('assistant', 'In-Website Writer backend is not available.');
+      return;
+    }
+
+    const space = document.getElementById('chat-history-output');
+    const thinkingMsg = document.createElement('div');
+    thinkingMsg.className = 'chat-message assistant';
+    const thinkingBubble = document.createElement('div');
+    thinkingBubble.className = 'bubble';
+    thinkingBubble.style.cssText = 'opacity:.55;font-style:italic';
+    thinkingBubble.textContent = 'Writing…';
+    thinkingMsg.appendChild(thinkingBubble);
+    space?.appendChild(thinkingMsg);
+    if (space) space.scrollTop = space.scrollHeight;
+
+    app.log(`[In-Website Writer]: Instruction submitted — "${text}"`);
+
+    try {
+      const result = await window.pywebview.api.process_inline_writing(text);
+      thinkingBubble.style.cssText = '';
+
+      if (result?.status !== 'success' || !result?.text) {
+        thinkingBubble.style.color = '#c0392b';
+        thinkingBubble.textContent = result?.message ?? 'Could not generate text.';
+        app.log(`[In-Website Writer]: Generation failed — ${result?.message ?? 'unknown error'}`);
+        return;
+      }
+
+      const injectResult = await window.injectTextAtPlaceholder(result.text);
+      if (injectResult.success) {
+        thinkingBubble.textContent = 'Generated text inserted at the ?aiwrite placeholder on the page.';
+        app.log('[In-Website Writer]: Draft inserted into page field.');
+      } else {
+        thinkingBubble.textContent =
+          `${injectResult.message ?? 'Placeholder not found.'} Generated copy:\n\n${result.text}`;
+        app.log(`[In-Website Writer]: ${injectResult.message ?? 'Injection failed.'}`);
+      }
+    } catch (err) {
+      thinkingBubble.style.cssText = 'color:#c0392b';
+      thinkingBubble.textContent = `Error: ${err?.message ?? String(err)}`;
+      app.log(`[In-Website Writer]: Bridge error — ${err?.message ?? err}`);
+    } finally {
+      if (space) space.scrollTop = space.scrollHeight;
     }
     return;
   }
@@ -1028,6 +1255,35 @@ function injectNavigationInterceptor(html) {
     window.parent.postMessage({ type: 'nabu-navigate', url: url }, '*');
   }, true);
 
+  // ── In-Website Writer: replace ?aiwrite placeholders on demand ─────────
+  var _aiwriteToken = '?aiwrite';
+  var _replaceAiwrite = function (replacement) {
+    var replaced = false;
+    document.querySelectorAll('input, textarea').forEach(function (el) {
+      if (typeof el.value === 'string' && el.value.indexOf(_aiwriteToken) !== -1) {
+        el.value = el.value.replace(_aiwriteToken, replacement);
+        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+        try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {}
+        replaced = true;
+      }
+    });
+    document.querySelectorAll('[contenteditable="true"], [contenteditable=""]').forEach(function (el) {
+      var txt = el.innerText || el.textContent || '';
+      if (txt.indexOf(_aiwriteToken) !== -1) {
+        el.innerText = txt.replace(_aiwriteToken, replacement);
+        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+        replaced = true;
+      }
+    });
+    return replaced;
+  };
+  window.addEventListener('message', function (e) {
+    if (e.data && e.data.type === 'nabu-inject-placeholder') {
+      var ok = _replaceAiwrite(String(e.data.text || ''));
+      try { window.parent.postMessage({ type: 'nabu-inject-result', success: ok }, '*'); } catch (_) {}
+    }
+  });
+
   // ── Storage / cookie polyfill for null-origin sandbox ──────────────────
   // When the iframe runs without sandbox="allow-same-origin" it receives a
   // null/opaque origin.  Any access to localStorage, sessionStorage, or
@@ -1099,8 +1355,9 @@ function injectNavigationInterceptor(html) {
  * the proxy bridge is unavailable or throws.
  *
  * @param {string} url  Fully-qualified URL to load.
+ * @param {{ skipHistory?: boolean, replace?: boolean }} options
  */
-async function loadUrl(url) {
+async function loadUrl(url, options = {}) {
   const frame = document.getElementById('web-view');
   const bar   = document.getElementById('address-bar');
   if (!frame) return;
@@ -1145,6 +1402,9 @@ async function loadUrl(url) {
     if (tabs.activeId != null) {
       tabs.setUrl(tabs.activeId, finalUrl);
       tabs.setTitle(tabs.activeId, finalTitle);
+      if (!options.skipHistory) {
+        tabs.recordNavigation(tabs.activeId, finalUrl, finalTitle, { replace: options.replace });
+      }
       logNavigationToPython(tabs.activeId, finalUrl, finalTitle, result.text ?? '');
       // Persist the updated URL and title so the next restore reflects
       // the page the user actually navigated to.
@@ -1268,18 +1528,45 @@ async function handleNavigation() {
   await loadUrl(searchUrl);
 }
 
-function navBack() {
-  console.log('Nav: back');
-  app.log('Navigation: back');
-  const frame = document.getElementById('web-view');
-  try { frame.contentWindow.history.back(); } catch (_) {}
+/**
+ * Loads a history entry without mutating the tab's history stack.
+ * @param {{ url: string, title: string }} entry
+ */
+async function loadHistoryEntry(entry) {
+  if (!entry || entry.url === 'about:blank' || !entry.url) {
+    const frame = document.getElementById('web-view');
+    if (frame) {
+      try { frame.removeAttribute('src'); } catch (_) {}
+      frame.srcdoc = NEW_TAB_HTML;
+    }
+    const bar = document.getElementById('address-bar');
+    if (bar) bar.value = '';
+    app.state.currentUrl = '';
+    if (tabs.activeId != null) {
+      tabs.setUrl(tabs.activeId, '');
+      tabs.setTitle(tabs.activeId, 'New Tab');
+      syncTabState(tabs.activeId, 'about:blank', 'New Tab', true);
+    }
+    return;
+  }
+  await loadUrl(entry.url, { skipHistory: true });
+  if (tabs.activeId != null && entry.title) {
+    tabs.setTitle(tabs.activeId, entry.title);
+  }
 }
 
-function navForward() {
-  console.log('Nav: forward');
-  app.log('Navigation: forward');
-  const frame = document.getElementById('web-view');
-  try { frame.contentWindow.history.forward(); } catch (_) {}
+async function navBack() {
+  const entry = tabs.historyBack();
+  if (!entry) return;
+  app.log(`Navigation: back → "${entry.url}"`);
+  await loadHistoryEntry(entry);
+}
+
+async function navForward() {
+  const entry = tabs.historyForward();
+  if (!entry) return;
+  app.log(`Navigation: forward → "${entry.url}"`);
+  await loadHistoryEntry(entry);
 }
 
 function navRefresh() {
@@ -1287,7 +1574,7 @@ function navRefresh() {
   app.log('Navigation: refresh');
   const url = app.state.currentUrl;
   if (url && url !== 'about:blank') {
-    loadUrl(url);
+    loadUrl(url, { replace: true });
   } else {
     const frame = document.getElementById('web-view');
     if (frame) { try { frame.removeAttribute('src'); } catch (_) {} frame.srcdoc = NEW_TAB_HTML; }

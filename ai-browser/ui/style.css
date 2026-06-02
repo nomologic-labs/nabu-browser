@@ -118,8 +118,9 @@ html, body {
   user-select: none;
   flex-shrink: 0;
 }
-.nav-btn:hover  { background: var(--divider); color: var(--text_main); }
-.nav-btn:active { background: #ddd8ce; }
+.nav-btn:hover:not(:disabled)  { background: var(--divider); color: var(--text_main); }
+.nav-btn:active:not(:disabled) { background: #ddd8ce; }
+.nav-btn:disabled { opacity: 0.35; cursor: default; }
 
 /* ── Center: Address Row ────────────────────────────────────── */
 .nav-center {
@@ -566,6 +567,27 @@ html, body {
   box-shadow: 0 0 0 3px var(--focus_ring);
 }
 .feature-select option { background: var(--bg_card); color: var(--text_main); font-weight: 400; }
+
+/* ── In-Website Writer mode hint ────────────────────────────── */
+.writer-options {
+  display: none;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 12px 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text_muted);
+}
+.writer-options.visible { display: block; }
+.writer-options code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg_card);
+  border: 1px solid var(--divider);
+  color: var(--text_main);
+}
 
 /* ── Dynamic Chat Space ─────────────────────────────────────── */
 .chat-space {

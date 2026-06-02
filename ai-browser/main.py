@@ -357,6 +357,46 @@ class NabuAPI:
             # Fallback to the original user query so the browser doesn't break if Ollama is asleep
             return {"status": "error", "keywords": query, "message": str(e)}
 
+    def process_inline_writing(self, instruction):
+        """
+        In-Website Writer: generate copy for a ?aiwrite placeholder on the active page.
+        """
+        instruction = str(instruction).strip()
+        if not instruction:
+            return {"status": "error", "text": "", "message": "Instruction was empty."}
+        if not self._ai_is_enabled():
+            return {
+                "status": "error",
+                "text": "",
+                "message": "Local AI is turned off",
+            }
+
+        prompt = (
+            "You are an inline copywriting assistant built directly into a web browser text field. "
+            "Your task is to write content that perfectly matches the user's specific text "
+            "generation instructions.\n\n"
+            f'Instructions: "{instruction}"\n\n'
+            "Output ONLY the direct text requested by the user. Do not include any introductory "
+            "commentary, conversational pleasantries, wrapping quotation marks, or markdown blocks "
+            "outside of the absolute requested draft copy."
+        )
+
+        try:
+            ai_output = self._ollama_generate(prompt, timeout=30)
+            if not ai_output:
+                return {
+                    "status": "error",
+                    "text": "",
+                    "message": "Ollama returned an empty response.",
+                }
+
+            print(f"[In-Website Writer] Generated copy for instruction: '{instruction[:120]}'")
+            return {"status": "success", "text": ai_output}
+
+        except Exception as e:
+            print(f"[In-Website Writer Error] {e}")
+            return {"status": "error", "text": "", "message": str(e)}
+
     def _init_db(self):
         """Creates nabu.db tables if they don't exist yet."""
         conn = sqlite3.connect(self.db_path)
